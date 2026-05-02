@@ -1,11 +1,12 @@
 /*
 UNAPIESP.h
-    ESP 8266 or 32 UNAPI Implementation.
+    ESP32 UNAPI Implementation.
     Revision 1.50
 
-Requires Arduino IDE and ESP8266 or ESP32 libraries
+Requires Arduino IDE and ESP32 libraries
 
 Copyright (c) 2019 - 2026 Oduvaldo Pavan Junior ( ducasp@ gmail.com )
+Copyright (c) 2026 - Leo Manes ( https://github.com/leomanes )
 All rights reserved.
 
 HTTP functionality
@@ -36,8 +37,10 @@ along with this file.  If not, see <https://www.gnu.org/licenses/>
 #define _UNAPIESP_H
 
 #define MAX_CMD_DATA_LEN 2148
-//#define ALLOW_OTA_UPDATE
-//#define ALLOW_TLS
+//Uncomment ONLY the board you are targeting
+#define ESP_C6_BOARD
+//#define ESP_S3_BOARD
+#define ALLOW_TLS
 
 struct ESPConfig {
   unsigned char ucConfigFileName[8];
@@ -77,6 +80,8 @@ enum CustomFunctions {
   CUSTOM_F_SCAN_R = 's',
   CUSTOM_F_CONNECT_AP = 'A',
   CUSTOM_F_CLEAR_AP = 'a',
+  CUSTOM_F_GETBOARD = 'b',
+  CUSTOM_F_FILE_BOARD = 'B',
   CUSTOM_F_UPDATE_FW = 'U',
   CUSTOM_F_UPDATE_CERTS = 'u',
   CUSTOM_F_GET_VER = 'V',

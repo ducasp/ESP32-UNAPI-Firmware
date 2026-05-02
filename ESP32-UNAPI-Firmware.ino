@@ -1,11 +1,12 @@
 /*
 ESP32-UNAPI-Firmware.ino
     ESP32 UNAPI Implementation.
-    Revision 1.0
+    Revision 1.1
 
 Requires Arduino IDE and ESP32 libraries
 
 Copyright (c) 2019 - 2026 Oduvaldo Pavan Junior ( ducasp@ gmail.com )
+Copyright (c) 2026 - Leo Manes ( https://github.com/leomanes )
 All rights reserved.
 
 HTTP functionality
@@ -17,7 +18,7 @@ possibility of sending one piece of it as a thank you to the author :)
 Of course this is not mandatory, if you like the idea, contact the
 author in the e-mail address above.
 
-This file, that is part of ESP8266 UNAPI Firmware program, is free
+This file, that is part of ESP32 UNAPI Firmware program, is free
 software: you can redistribute it and/or modify it under the terms
 of the GNU Lesser General Public License as published by the Free
 Software Foundation, either version 2.1 of the License, or (at your
@@ -30,54 +31,50 @@ GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
 along with this file.  If not, see <https://www.gnu.org/licenses/>
+
+v1.0
+    - Initial ESP32 support, no HTTPS, no firmware update
+
+v1.1 (Merging with Leo Manes ESP32 Port)
+    - HTTPS with TLS 1.2 by Leo Manes (WiFiClientSecure / mbedTLS)
+    - Changed LittleFS to FFat (APP:I set to 3MB / OTA:above 1.5MB for now)
+    - Added missing WiFiClientSecure include
+    - Fixed Update.begin() parameters (U_SPIFFS instead of U_FS)
+    - Fixed IPAddress comparisons
+    - Added online led (blue using the onboard WS2812)
 */
+
 #include "UNAPIESP.h"
-#include <NetworkClient.h>
-typedef NetworkClient WiFiClient;
-#include "NetworkServer.h"
-typedef NetworkServer WiFiServer;
-#include <WiFiUdp.h>
-#include <EEPROM.h>
-#ifdef ALLOW_OTA_UPDATE
-#include <ESP8266httpUpdate.h>
-#endif
-#ifdef ALLOW_TLS
-#include <CertStoreBearSSL.h>
-#include <time.h>
-#include <FS.h>
-#include <LittleFS.h>
-#endif
-#include "Ticker.h"
-#include "HTTPClient.h"
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <Update.h>
+#include <HTTPClient.h>
+#include <HTTPUpdate.h>
+
+#include <FFat.h>
+#include <Ticker.h>
+#include <time.h>
+#include <EEPROM.h>
+#include "HTTPClient.h"
 
 #define HTTP_PACKET_SIZE 2048
 
-#ifdef ALLOW_TLS
-// TLS related 
-bool bCertStoreInit = false;
-BearSSL::CertStore certStore;
-//TLS Connection Objects
-BearSSL::WiFiClientSecure *TClient1;
+WiFiClientSecure *TClient1;
+static char *g_caPem = NULL;
+static size_t g_caPemLen = 0;
+static uint8_t *g_caBundle = NULL;
+static size_t g_caBundleLen = 0;
 unsigned char bTLSInUse = 0;
 unsigned char uchTLSHost[256];
 bool bHasHostName = false;
-#endif
 
-const char chVer[4] = "0.1";
+const char chVer[4] = "1.1";
 byte btConnections[4] = {CONN_CLOSED,CONN_CLOSED,CONN_CLOSED,CONN_CLOSED};
 //UDP Objects
-WiFiUDP Udp1;
-WiFiUDP Udp2;
-WiFiUDP Udp3;
-WiFiUDP Udp4;
+WiFiUDP Udp1, Udp2, Udp3, Udp4;
 //TCP Connection Objects
 WiFiClient * ClientList[4] = {NULL, NULL, NULL, NULL};
 //Passive TCP Connection Objects
-WiFiClient Client1;
-WiFiClient Client2;
-WiFiClient Client3;
-WiFiClient Client4;
 WiFiServer * ServerList[4] = {NULL, NULL, NULL, NULL};
 byte btUDPConnections[4] = {CONN_CLOSED,CONN_CLOSED,CONN_CLOSED,CONN_CLOSED};
 byte btIsTransient[4] = {0,0,0,0};
@@ -92,8 +89,15 @@ IPAddress externalIP,DNSQueryIP;
 bool bIPAutomatic = true;
 bool bDNSAutomatic = true;
 bool bSerialUpdateInProgress = false;
+// True when RS232 update is a CERT update (Y/z/E flow)
+// rather than a firmware update (Z/z/E flow). The cert path streams bytes
+// to a file on FFat instead of using Update.begin/write/end, because the
+// ESP8266 reference's certs.bin is a LittleFS partition image which is
+// neither format-compatible with our FFat partition nor with mbedTLS.
+bool bSerialCertUpdateInProgress = false;
+File g_certUploadFile;
 unsigned char ucReceivedCommand = NO_COMMAND;
-unsigned char ucLastCmd,ucLastResponse;
+unsigned char ucLastCmd, ucLastResponse;
 unsigned int uiLastDataSize;
 unsigned char *ucLastData;
 ESPConfig stDeviceConfiguration;
@@ -102,6 +106,9 @@ byte btReadyRetries;
 byte btReceivedCommand;
 bool bWiFiOn = false;
 Ticker tickerRadioOff;
+// Set from Ticker (esp_timer task) context; consumed in loop() to keep WiFi
+// stack calls on the Arduino main task.
+volatile bool bDisableRadioPending = false;
 unsigned long longTimeOut;
 unsigned long longReadyTimeOut;
 struct tm timeinfo;
@@ -109,9 +116,7 @@ bool bSNTPOK = false;
 bool bHoldConnection = false;
 time_t now;
 bool bSkipStateCheck = false;
-
-void WaitConnectionIfNeeded(bool bFastReturn);
-
+// HTTP globals
 static bool http_connected = false;
 static HTTPClient http;
 static WiFiClient client;
@@ -119,6 +124,52 @@ static WiFiClient *stream = NULL;
 static unsigned int http_chunk_size = 0;
 static unsigned int http_chunk_header_idx = 0;
 static unsigned long longTimeOut2;
+
+// ======================== Helper Functions ========================
+void WaitConnectionIfNeeded(bool bFastReturn);
+void DisableRadio();
+void RadioUpdateStatus();
+void ScheduleTimeoutCheck();
+bool CacheCertificates();
+
+// ======================== ONBOARD WIFI-CONNECTED LED ========================
+// Blue led if STA has an IP. "WiFi up"
+// firmware OTA it should reconnect on its own after reboot
+//
+// Configure for your board:
+//   WIFI_LED_PIN   pin number (LED_BUILTIN if WS2812 RGB on GPIO 48)
+//   WIFI_LED_RGB   set to 1 if the onboard LED is a WS2812
+//   WIFI_LED_ON    HIGH/LOW
+#ifndef WIFI_LED_PIN
+  #ifdef ESP_S3_BOARD
+    #define WIFI_LED_PIN  48      // ESP32-S3-Dev: WS2812 on GPIO 48
+  #endif
+  #ifdef ESP_C6_BOARD
+    #define WIFI_LED_PIN  8      // ESP32-C6-Dev: WS2812 on GPIO 8
+#endif    
+#endif
+#ifndef WIFI_LED_RGB
+  #define WIFI_LED_RGB  1       // 1 = WS2812; 0 = plain GPIO LED
+#endif
+#ifndef WIFI_LED_ON
+  #define WIFI_LED_ON   HIGH
+#endif
+
+static inline void wifiLedSet(bool on) {
+#if WIFI_LED_RGB
+  // blue at 50% = connected (R=0, G=0, B=128)
+  rgbLedWrite(WIFI_LED_PIN, 0, 0, on ? 128 : 0);
+#else
+  digitalWrite(WIFI_LED_PIN, on ? WIFI_LED_ON : !WIFI_LED_ON);
+#endif
+}
+
+static inline void wifiLedInit() {
+#if !WIFI_LED_RGB
+  pinMode(WIFI_LED_PIN, OUTPUT);
+#endif
+  wifiLedSet(false);
+}
 
 static byte http_open(const char *url) {
   http_close();
@@ -210,20 +261,28 @@ static uint8_t http_close(uint8_t err) {
   return err;
 }
 
+// UNAPI send helpers - Bad IP translation fixed
+// Extract the 4 raw IP bytes from an IPAddress. We can't just memcpy or cast
+// &ip to uint8_t* like before. arduino-esp32's IPAddress Printable so DNS responses returning
+// flash-code addresses like 0x3C0E6F20 instead of real IPs.)
+static inline void ipToBytes(const IPAddress& ip, uint8_t* out) {
+  out[0] = ip[0];
+  out[1] = ip[1];
+  out[2] = ip[2];
+  out[3] = ip[3];
+}
+
 unsigned char getConnStatus()
 {
-  unsigned char uchRet = 0; // default idle
-
-  if (WiFi.status() != WL_CONNECTED)
-  {
-    if (WiFi.status() == WL_NO_SSID_AVAIL)
-      uchRet = 3; //No AP Found
-    else
-      uchRet = 2; //Probably wrong password, not connected but SSID is available
+	wl_status_t st = WiFi.status();
+	switch (st) {
+		case WL_CONNECTED:      return 5; // STATION_GOT_IP
+		case WL_CONNECT_FAILED: return 4; // STATION_CONNECT_FAIL
+		case WL_NO_SSID_AVAIL:  return 3; // STATION_NO_AP_FOUND
+		case WL_DISCONNECTED:   return 1; // STATION_CONNECTING
+		case WL_IDLE_STATUS:    return 0; // STATION_IDLE
+		default:                return 2; //Probably wrong password, not connected but SSID is available
   }
-  else uchRet = 5; //Got IP
-
-  return uchRet;
 }
 
 // Set time via NTP, as required for x.509 validation
@@ -322,14 +381,34 @@ bool validateConfigFile()
 }
 
 void ScheduleTimeoutCheck() {
-    tickerRadioOff.once(stDeviceConfiguration.uiRadioOffTimer,DisableRadio);
+    tickerRadioOff.once(stDeviceConfiguration.uiRadioOffTimer, []() { bDisableRadioPending = true; });
+}
+
+void  CancelTimeoutCheck() {
+  tickerRadioOff.detach();
+}
+
+void WaitConnectionIfNeeded(bool bFastReturn = false)
+{
+  if (WiFi.status() != WL_CONNECTED) {
+    unsigned long timeout = millis() + (bFastReturn ? 6500 : 10000);
+    while (WiFi.status() != WL_CONNECTED && millis() < timeout) {
+      yield();
+    }
+  }
+}
+
+byte checkOpenConnections() {
+  byte count = 0;
+  for (int i = 0; i < 4; i++)
+    if (btConnections[i] != CONN_CLOSED) count++;
+  return count;
 }
 
 void setup() {
+  // Onboard LED for visible WiFi-up indicator. Always on; independent of debug.
+  wifiLedInit();
   WiFi.persistent(true);
-  #ifdef ALLOW_TLS
-  LittleFS.begin();
-  #endif
   EEPROM.begin(32);
   Serial.begin(859372);
   Serial.setRxBufferSize(2148);
@@ -341,6 +420,27 @@ void setup() {
   longReadyTimeOut = 0;
   btReadyRetries = 3;
   btReceivedCommand = false;
+
+  // WiFi event handler: drives the LED unconditionally; debug-prints only
+  // when DEBUG_WIFI_CONNECT is defined. We register this even in production
+  // builds so the LED accurately reflects link state across reconnects.
+  WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+    switch (event) {
+      case ARDUINO_EVENT_WIFI_STA_GOT_IP:        wifiLedSet(true);  break;
+      case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:  wifiLedSet(false); break;
+      default: break;
+    }
+  });
+
+  // Initialize file system (FFat). On first boot of a freshly-flashed image
+  // the partition has no FAT structure yet — FFat.begin(false) will fail and
+  // we format with FFat.begin(true). Subsequent boots mount cleanly.
+  // IMPORTANT: do NOT print FFat status to ALL_SERIAL — that's the UART to
+  // the FPGA and any stray text corrupts the UNAPI byte stream.
+  if (!FFat.begin(false)) {
+    FFat.begin(true);
+  }
+
   //Serial.println(ESP.getFullVersion().c_str());  
   WiFi.setSleep(false);
   WiFi.persistent(true);
@@ -348,6 +448,12 @@ void setup() {
   if (stDeviceConfiguration.ucAutoClock!=3)
   {
     WiFi.mode(WIFI_STA);
+	// Pin minimum auth to WPA2-PSK so the station won't accept OPEN/WEP/WPA-PSK
+    // candidates. This also nudges the driver away from preferring WPA3-SAE on
+    // WPA2/WPA3 transition-mode APs, which is the most common cause of a
+    // ~10-second 4-way handshake timeout when the password is otherwise correct.
+    WiFi.setMinSecurity(WIFI_AUTH_WPA2_PSK);
+    WiFi.setTxPower(WIFI_POWER_15dBm);
     bWiFiOn = true;
     if (!stDeviceConfiguration.ucAlwaysOn)
       ScheduleTimeoutCheck();
@@ -358,18 +464,8 @@ void setup() {
     bWiFiOn = false;
   }  
   configTime(0,0, "pool.ntp.org");
+  CacheCertificates();
   Serial.println("Ready");  
-}
-
-byte checkOpenConnections ()
-{
-  byte btOpenConnections = 0;
-
-  for (unsigned int i = 0; i < 4; i++)
-    if (btConnections[i])
-      btOpenConnections++;
-    
-  return btOpenConnections;
 }
 
 void DisableRadio () {
@@ -380,14 +476,11 @@ void DisableRadio () {
     {
       bWiFiOn = false;
       RadioUpdateStatus();
+      RadioUpdateStatus();
     }
   }
   else if ((!stDeviceConfiguration.ucAlwaysOn)&&(stDeviceConfiguration.ucAutoClock != 3))
     ScheduleTimeoutCheck();
-}
-
-void  CancelTimeoutCheck() {
-  tickerRadioOff.detach();
 }
 
 void RadioUpdateStatus () {
@@ -401,36 +494,83 @@ void RadioUpdateStatus () {
     WiFi.mode(WIFI_OFF);
 }
 
-void WaitConnectionIfNeeded(bool bFastReturn = false)
-{
-  if (WiFi.status() != WL_CONNECTED)
-  {
-    if (!bFastReturn)
-      longTimeOut = millis () + 10000; // will wait up to 10s
-    else
-      longTimeOut = millis () + 6500; // will wait up to 6.5s
-    do
-    {
-      yield();
+bool CacheCertificates() {
+  if (g_caPem != NULL)
+    free(g_caPem);
+  if (g_caBundle != NULL)
+    free(g_caBundle);
+
+  g_caPem = NULL;
+  g_caBundle = NULL;
+  g_caPemLen = 0;
+  g_caBundleLen = 0;
+
+  const char *pemPaths[] = {"/ca.pem", "/cacert.pem"};
+  for (size_t i = 0; i < (sizeof(pemPaths) / sizeof(pemPaths[0])); i++) {
+    File caFile = FFat.open(pemPaths[i], "r");
+    if (caFile) {
+      size_t size = caFile.size();
+      if (size > 0) {
+        char *buf = (char*)malloc(size + 1);
+        if (buf != NULL) {
+          size_t rd = caFile.readBytes(buf, size);
+          buf[rd] = 0;
+          caFile.close();
+          g_caPem = buf;
+          g_caPemLen = rd;
+          return true;
+        }
+      }
+      caFile.close();
     }
-    while((WiFi.status() != WL_CONNECTED)&&(longTimeOut>millis()));
   }
+
+  File bundle = FFat.open("/certs.bin", "r");
+  if (bundle) {
+    size_t size = bundle.size();
+    if (size > 0) {
+      uint8_t *buf = (uint8_t*)malloc(size);
+      if (buf != NULL) {
+        size_t rd = bundle.read(buf, size);
+        bundle.close();
+        if (rd == size) {
+          g_caBundle = buf;
+          g_caBundleLen = size;
+          return true;
+        }
+        free(buf);
+      } else {
+        bundle.close();
+      }
+    } else {
+      bundle.close();
+    }
+  }
+  return false;
 }
 
-#ifdef ALLOW_TLS
 bool InitCertificates() { 
-  if (WiFi.status() != WL_CONNECTED)
-    return false; 
-
-  bCertStoreInit = true;
+  CacheCertificates();
   setClock(); // Required for X.509 validation
-  const char chIndex[] = "/certs.idx";
-  const char chCerts[] = "/certs.ar";
-  certStore.initCertStore(LittleFS, (const char*)chIndex, (const char*)chCerts, false);  
 
   return true;
 }
-#endif
+
+// Load CA certificates from FFat (FATFS)
+// Both cacert.pem and legacy certs.bin will work
+bool loadCACertForClient(WiFiClientSecure *client) {
+  if (g_caPem != NULL && g_caPemLen > 0) {
+    client->setCACert(g_caPem);
+    return true;
+  }
+
+  if (g_caBundle != NULL && g_caBundleLen > 0) {
+    client->setCACertBundle(g_caBundle, g_caBundleLen);
+    return true;
+  }
+
+  return false;
+}
 
 bool IsActivePortInUse (unsigned int uiPort)
 {
@@ -447,7 +587,7 @@ bool IsActivePortInUse (unsigned int uiPort)
   return bRet;  
 }
 
-WiFiServer * IsPassivePortInUse (unsigned int uiPort)
+WiFiServer *IsPassivePortInUse (unsigned int uiPort)
 {
   byte btLoop;
   WiFiServer * newServer;
@@ -546,10 +686,10 @@ void CloseTcpConnection (byte btConnNumber)
       break;
     }
     uiRemotePorts[0]=0;
-#ifdef ALLOW_TLS    
+
     if (btConnections[btConnNumber-1] == CONN_TCP_TLS_A)
       bTLSInUse = 0;
-#endif
+
   }
   
   if (ServerList[btConnNumber-1])
@@ -648,30 +788,16 @@ void TcpState(byte btCMDConnNumber)
   unsigned char ucResponse[16];
   memset (ucResponse,0,sizeof(ucResponse));
 
-#ifdef ALLOW_TLS
   if (btConnections[btCMDConnNumber-1] == CONN_TCP_TLS_A)
   {    
     if (ClientList[btCMDConnNumber-1]->connected())
       ucResponse[0] = 1; //It is a flag indicating it is TLS connection
     else
     {
-      TClient1 = (BearSSL::WiFiClientSecure*)ClientList[btCMDConnNumber-1];
-      switch (TClient1->getLastSSLError())
-      {
-        case BR_ERR_BAD_SIGNATURE:
-        case BR_ERR_X509_BAD_SIGNATURE:
-          ucResponse[0]=10; // Invalid server certificate
-        break;
-        case BR_ERR_X509_BAD_SERVER_NAME:
-          ucResponse[0]=11; // Invalid server certificate, host name did not match
-        break;
-        default:
-          ucResponse[0]=19; //TLS Other
-        break;
-      }
+	  //TODO: can check real error instead of returning TLS other?
+      ucResponse[0] = 19;
     }
   }
-#endif
 
   if (ClientList[btCMDConnNumber-1]!=NULL)
   {
@@ -789,14 +915,12 @@ void received_data_parser ()
   bool bPWD = false;
   unsigned char ucSSID[33];
   unsigned char ucPWD[65];
-#ifdef ALLOW_OTA_UPDATE  
   unsigned char ucOTAServer[256];
   unsigned char ucOTAFile[256];
   uint16_t uiOTAPort;
   String stOTAServer,stOTAFile,stVersion;
   WiFiClient OTAclient;
   t_httpUpdate_return OTAret;
-#endif  
   uint32_t ulSerialUpdateSize = 0;  
   byte bAutoIPConfig=0;  
   uint32_t bin_flash_size;
@@ -831,21 +955,17 @@ void received_data_parser ()
         }
 
         switch(btCommand)
-        {
-#ifdef ALLOW_TLS          
+        {     
           case CUSTOM_F_INITCERTS:
             if(!InitCertificates())
             {
-              bCertStoreInit = false;
               SendQuickResponse(btCommand,UNAPI_ERR_NO_DATA);
             }
             else
             {
-              bCertStoreInit = true;
               SendQuickResponse(btCommand,UNAPI_ERR_OK);              
             }
           break;
-#endif        
           case CUSTOM_F_RETRY_TX:
             if(ucReceivedCommand == QUICK_COMMAND)
             {
@@ -860,11 +980,45 @@ void received_data_parser ()
             WarmBoot();
             Serial.println("Ready");  
           break;
-#ifdef ALLOW_OTA_UPDATE
           case CUSTOM_F_END_RS232_UPDATE:
             if (!bSerialUpdateInProgress)            
             {
               SendQuickResponse(btCommand,UNAPI_ERR_INV_PARAM);
+            }
+			else if (bSerialCertUpdateInProgress) 
+			{
+              // Finalize the cert upload: close the temp file, sniff the
+              // first bytes to decide PEM vs mbedTLS bundle, rename to the
+              // appropriate path, invalidate the cached-cert pointers so
+              // next HTTPS connect reloads from FFat.
+              g_certUploadFile.close();
+              bSerialCertUpdateInProgress = false;
+              bSerialUpdateInProgress = false;
+
+              char hdr[12] = {0};
+              size_t hdrRead = 0;
+              File t = FFat.open("/cert_upload.tmp", "r");
+              if (t) 
+			  {
+                hdrRead = t.readBytes(hdr, 11);
+                t.close();
+              }
+
+              const char* targetPath = "/certs.bin";  // mbedTLS bundle (default)
+              if (hdrRead >= 11 && memcmp(hdr, "-----BEGIN ", 11) == 0)
+                targetPath = "/ca.pem";               // PEM text
+
+              if (FFat.exists(targetPath)) FFat.remove(targetPath);
+              if (FFat.rename("/cert_upload.tmp", targetPath)) 
+			  {
+                // Drop in-memory cached certs so loadCACertForClient() reloads
+                if (g_caPem)    { free(g_caPem);    g_caPem = NULL;    g_caPemLen = 0; }
+                if (g_caBundle) { free(g_caBundle); g_caBundle = NULL; g_caBundleLen = 0; }
+                SendQuickResponse(btCommand, UNAPI_ERR_OK);
+                // No ESP.restart() — cert update is hot-applied.
+              } 
+			  else
+                SendQuickResponse(btCommand, UNAPI_ERR_NO_DATA);
             }
             else
             {
@@ -876,16 +1030,15 @@ void received_data_parser ()
               {
                 SendQuickResponse(btCommand,UNAPI_ERR_OK);
                 bSerialUpdateInProgress = false;
-                esp_restart();
+                ESP.restart();
               }
             }
           break;
-#endif
           //Reset?
           case CUSTOM_F_RESET:            
             Serial.print("R0");
             if (!bSerialUpdateInProgress)
-              esp_restart();
+              ESP.restart();
             break;
           //GET Access Point Status
           case CUSTOM_F_GETAPSTS:
@@ -991,6 +1144,8 @@ void received_data_parser ()
             Serial.write(chVer[2]-'0');      
             break;
           case CUSTOM_F_SCAN:
+            // ESP32 when with bad credentials will not scan unless you call disconnectds
+            WiFi.disconnect();
             WiFi.scanNetworks(true,false);
             SendQuickResponse('S',0);
             break;
@@ -1065,11 +1220,9 @@ void received_data_parser ()
           case TCPIP_TCP_STATE:
           case TCPIP_TCP_SEND:
           case TCPIP_TCP_RCV:
-          case CUSTOM_F_CONNECT_AP:
-#ifdef ALLOW_OTA_UPDATE            
+          case CUSTOM_F_CONNECT_AP:         
           case CUSTOM_F_UPDATE_FW:
           case CUSTOM_F_UPDATE_CERTS:
-#endif          
           case TCPIP_CONFIG_AUTOIP:
           case TCPIP_CONFIG_IP:
           case CUSTOM_F_START_RS232_UPDATE:
@@ -1127,7 +1280,6 @@ void received_data_parser ()
 proccesscmd:    
       switch(btCommand)
       {
-#ifdef ALLOW_OTA_UPDATE
         case CUSTOM_F_START_RS232_UPDATE:
         case CUSTOM_F_START_RS232_CERT_UPDATE:
           if ((uiCmdDataLen !=12)||(bSerialUpdateInProgress))
@@ -1137,21 +1289,26 @@ proccesscmd:
             ulSerialUpdateSize = btCommandData[0] + (btCommandData[1]*0x100) + (btCommandData[2]*0x10000) + (btCommandData[3]*0x1000000) + (btCommandData[4]*0x100000000) + (btCommandData[5]*0x10000000000)+ (btCommandData[6]*0x1000000000000)+ (btCommandData[7]*0x100000000000000);
             if (btCommand == CUSTOM_F_START_RS232_CERT_UPDATE)
             {
-                if(!Update.begin(ulSerialUpdateSize, U_FS, -1, HIGH))
-                  SendQuickResponse(btCommand,UNAPI_ERR_NO_DATA);
-                else
-                {
-                  SendQuickResponse(btCommand,UNAPI_ERR_OK);
-                  bSerialUpdateInProgress = true;
-                }
+              // Stream the cert bundle into a FFat temp file. On END we'll
+              // sniff the first bytes to decide whether it's PEM (rename to
+              // /ca.pem) or an mbedTLS bundle (rename to /certs.bin).
+              if (FFat.exists("/cert_upload.tmp")) FFat.remove("/cert_upload.tmp");
+              g_certUploadFile = FFat.open("/cert_upload.tmp", "w");
+              if (!g_certUploadFile)
+                SendQuickResponse(btCommand, UNAPI_ERR_NO_DATA);
+              else {
+                bSerialUpdateInProgress = true;
+                bSerialCertUpdateInProgress = true;
+                SendQuickResponse(btCommand, UNAPI_ERR_OK);
+              }
             }
             else
             {              
-              if ((ulSerialUpdateSize>ESP.getFreeSketchSpace(true))||(btCommandData[8]!=0xE9)||((bin_flash_size > ESP.getFlashChipRealSize())))
+              if (ulSerialUpdateSize > (ESP.getFreeSketchSpace() - 0x1000))
                 SendQuickResponse(btCommand,UNAPI_ERR_INV_PARAM);
               else
               {
-                if(!Update.begin(ulSerialUpdateSize, U_FLASH, -1, HIGH, true))
+                if(!Update.begin(ulSerialUpdateSize, U_FLASH, -1, HIGH))
                   SendQuickResponse(btCommand,UNAPI_ERR_INV_PARAM);
                 else
                 {
@@ -1165,7 +1322,16 @@ proccesscmd:
         case CUSTOM_F_BLOCK_RS232_UPDATE:
           if ((uiCmdDataLen == 0)||(!bSerialUpdateInProgress))
             SendQuickResponse(btCommand,UNAPI_ERR_INV_PARAM);
-          else
+          else if (bSerialCertUpdateInProgress) 
+		  {
+            // Cert path: append to the FFat temp file
+            size_t w = g_certUploadFile.write(btCommandData, uiCmdDataLen);
+            if (w != uiCmdDataLen)
+              SendQuickResponse(btCommand, UNAPI_ERR_NO_DATA);
+            else
+              SendQuickResponse(btCommand, UNAPI_ERR_OK);
+          }
+		  else
           {
             if (Update.write(btCommandData,uiCmdDataLen)!=uiCmdDataLen)
               SendQuickResponse(btCommand,UNAPI_ERR_NO_DATA);
@@ -1173,7 +1339,6 @@ proccesscmd:
               SendQuickResponse(btCommand,UNAPI_ERR_OK);
           }
         break;
-#endif
         case CUSTOM_F_SET_AUTOCLOCK:
           if ( (uiCmdDataLen != 2) || (btCommandData[0]>3) ||\
                ((btCommandData[1]>12)&&((btCommandData[1]<129)||(btCommandData[1]>140))) )
@@ -1229,15 +1394,8 @@ proccesscmd:
           {
             if (btCommandData[0]) //set?
             {
-              if (btCommandData[1]&1)
-                bIPAutomatic = true;
-              else
-                bIPAutomatic = false;
-
-              if (btCommandData[1]&2)
-                bDNSAutomatic = true;
-              else
-                bDNSAutomatic = false;
+              bIPAutomatic = (btCommandData[1] & 1) != 0;
+              bDNSAutomatic = (btCommandData[1] & 2) != 0;
             }
             if (bIPAutomatic)
               bAutoIPConfig|=B00000001;
@@ -1294,8 +1452,7 @@ proccesscmd:
             else //sorry
               SendResponse(btCommand,UNAPI_ERR_INV_PARAM,0,0);
           }
-        break;
-#ifdef ALLOW_OTA_UPDATE          
+        break;       
         case CUSTOM_F_UPDATE_FW:
         case CUSTOM_F_UPDATE_CERTS:          
           bOkParam = false;
@@ -1335,17 +1492,12 @@ proccesscmd:
               if (bOkParam)
               {              
                 yield();
-                ESPhttpUpdate.rebootOnUpdate(false);
                 stOTAServer = (const char*)ucOTAServer;
                 stOTAFile = (const char*)ucOTAFile;
-                stVersion = "";
                 if (btCommand == CUSTOM_F_UPDATE_FW)
-                {
-                  ESPhttpUpdate.rebootOnUpdate(true);
-                  OTAret = ESPhttpUpdate.update(OTAclient,(const String)stOTAServer,uiOTAPort,(const String)stOTAFile, (const String)stVersion);
-                }
+                  OTAret = httpUpdate.update(OTAclient, stOTAServer, uiOTAPort, stOTAFile);
                 else
-                  OTAret = ESPhttpUpdate.updateSpiffs(OTAclient,(const String)stOTAServer,uiOTAPort,(const String)stOTAFile);
+                  OTAret = httpUpdate.update(OTAclient, stOTAServer, uiOTAPort, stOTAFile);
                 if (OTAret==HTTP_UPDATE_OK)
                   SendQuickResponse(btCommand,0);
                 else
@@ -1356,15 +1508,13 @@ proccesscmd:
             if(!bOkParam)
               SendQuickResponse(btCommand,UNAPI_ERR_INV_PARAM);
           }
-          break;
-#endif          
+          break;     
         case CUSTOM_F_CONNECT_AP:
         {
           bool bSentRsp = false;
           bOkParam = false;
           bPWD = false;
-          
-          
+                    
           if (uiCmdDataLen <3)
             SendQuickResponse(btCommand,UNAPI_ERR_INV_PARAM);
           else
@@ -1386,8 +1536,7 @@ proccesscmd:
               {
                 //Yes
                 bPWD = true;
-                iPWDCount=0;
-                
+                iPWDCount=0;                
                 do
                 {                  
                     ucPWD[iPWDCount]=btCommandData[iAPItemI];
@@ -1398,17 +1547,14 @@ proccesscmd:
                 ucPWD[iPWDCount]=0;
               }
               WiFi.disconnect();
+			  delay(50);
               yield();
               if (bPWD)
-              {
                 WiFi.begin((const char*)ucSSID,(const char*)ucPWD);
-              }
               else
-              {
                 WiFi.begin((const char*)ucSSID);
-                
-              }
-              unsigned long ulTimeOut = millis() + 10000;
+
+              unsigned long ulTimeOut = millis() + 20000;
               do
               {
                 wl_status_t APsts;
@@ -1426,6 +1572,7 @@ proccesscmd:
                   break;
                 }
                 yield();
+				delay(100);  // let the WiFi task run; yield() alone is too tight on ESP32
               }
               while (ulTimeOut>millis());
               if (!bSentRsp)
@@ -1517,12 +1664,8 @@ proccesscmd:
               //Bit 3: Manually set the peer IP address                            
               //Bit 9: Use TLS in TCP passive connections
               //Bits 10-15: Unused
-              Serial.write(B11110111); //flags LSB
-#ifdef ALLOW_TLS              
+              Serial.write(B11110111); //flags LSB        
               Serial.write(B00000001); //flags MSB
-#else
-              Serial.write(B00000000); //flags MSB
-#endif              
               // Secondary features flags currently not defined, all 0
               Serial.write(0);
               Serial.write(0);
@@ -1538,44 +1681,30 @@ proccesscmd:
             SendResponse(btCommand,UNAPI_ERR_INV_PARAM,0,0);
           else
           {
-            WaitConnectionIfNeeded();
+            WaitConnectionIfNeeded(false);
             switch (btCommandData[0])
             {
               case TCPIP_GET_IPINFO_LOCALIP:
-                btIPRet[0] = WiFi.localIP()[0];
-                btIPRet[1] = WiFi.localIP()[1];
-                btIPRet[2] = WiFi.localIP()[2];
-                btIPRet[3] = WiFi.localIP()[3];
+                externalIP = WiFi.localIP();
               break;
               case TCPIP_GET_IPINFO_PEERIP:
-                memset (btIPRet,0,4);                
+                externalIP = IPAddress(0,0,0,0);                
               break;
               case TCPIP_GET_IPINFO_SUBNETMASK:
-                btIPRet[0] = WiFi.subnetMask()[0];
-                btIPRet[1] = WiFi.subnetMask()[1];
-                btIPRet[2] = WiFi.subnetMask()[2];
-                btIPRet[3] = WiFi.subnetMask()[3];
+                externalIP = WiFi.subnetMask();
               break;
               case TCPIP_GET_IPINFO_GATEWAY:
-                btIPRet[0] = WiFi.gatewayIP()[0];
-                btIPRet[1] = WiFi.gatewayIP()[1];
-                btIPRet[2] = WiFi.gatewayIP()[2];
-                btIPRet[3] = WiFi.gatewayIP()[3];
+                btIPRet[0] = externalIP = WiFi.gatewayIP();
               break;
               case TCPIP_GET_IPINFO_PRIMDNS:
-                btIPRet[0] = WiFi.dnsIP(0)[0];
-                btIPRet[1] = WiFi.dnsIP(0)[1];
-                btIPRet[2] = WiFi.dnsIP(0)[2];
-                btIPRet[3] = WiFi.dnsIP(0)[3];
+                externalIP = WiFi.dnsIP(0);
               break;
               case TCPIP_GET_IPINFO_SECDNS:
-                btIPRet[0] = WiFi.dnsIP(1)[0];
-                btIPRet[1] = WiFi.dnsIP(1)[1];
-                btIPRet[2] = WiFi.dnsIP(1)[2];
-                btIPRet[3] = WiFi.dnsIP(1)[3];
+                externalIP = WiFi.dnsIP(1);
               break;
             }
-            SendResponse(btCommand,UNAPI_ERR_OK,4,btIPRet);
+            uint8_t ipBytes[4]; ipToBytes(externalIP, ipBytes);
+            SendResponse(btCommand, UNAPI_ERR_OK, 4, ipBytes);
           }          
           break;  
 
@@ -1691,10 +1820,13 @@ proccesscmd:
                 {                  
                   if(WiFi.hostByName((const char*)&btCommandData[1],DNSQueryIP))
                   {
-                    if ((uint32_t)DNSQueryIP == (uint32_t)0x00000000 || (uint32_t)DNSQueryIP == (uint32_t)0xffffffff)
+                    if (DNSQueryIP == IPAddress(0,0,0,0) || DNSQueryIP == IPAddress(255,255,255,255))
                       SendResponse(btCommand,UNAPI_ERR_DNS,0,0);
                     else
-                      SendResponse(btCommand,UNAPI_ERR_OK,4,&DNSQueryIP[0]);
+					{
+						uint8_t ipBytes[4]; ipToBytes(DNSQueryIP, ipBytes);
+						SendResponse(btCommand, UNAPI_ERR_OK, 4, ipBytes);
+					}
                   }
                   else
                     SendResponse(btCommand,UNAPI_ERR_DNS,0,0);
@@ -1713,10 +1845,13 @@ proccesscmd:
             WaitConnectionIfNeeded();
             if(WiFi.hostByName((const char*)btCommandData,DNSQueryIP))
             {
-              if ((uint32_t)DNSQueryIP == 0x00000000 || (uint32_t)DNSQueryIP == 0xffffffff)
+              if (DNSQueryIP == IPAddress(0,0,0,0) || DNSQueryIP == IPAddress(255,255,255,255))
                 SendResponse(btCommand,UNAPI_ERR_DNS,0,0);
               else
-                SendResponse(btCommand,UNAPI_ERR_OK,4,&DNSQueryIP[0]);
+			  {
+                uint8_t ipBytes[4]; ipToBytes(DNSQueryIP, ipBytes);
+                SendResponse(btCommand, UNAPI_ERR_OK, 4, ipBytes);
+              }
             }
             else
               SendResponse(btCommand,UNAPI_ERR_DNS,0,0);
@@ -1738,7 +1873,7 @@ proccesscmd:
           else
             btCMDTransient = 1; //clear, so transient
 
-          WaitConnectionIfNeeded();
+          WaitConnectionIfNeeded(false);
             
           if ((uiCmdDataLen < 11) || (uiCMDLocalPort==0) || \
               (btCMDPassive & 0xf0) || ( (btCMDPassive & 4) && (uiCmdDataLen <12) ) || ( (btCMDPassive & 1) && (btCMDPassive & 4) ) || ( ((btCMDPassive & 1) == 0) && ((btCMDPassive & 4) ==0) && (btCMDPassive&8) ) || 
@@ -1774,11 +1909,10 @@ proccesscmd:
             {
               if (CheckActiveLocalPort(&uiCMDLocalPort))
               {
-#ifdef ALLOW_TLS
                 if (btCMDPassive&4) //TLS?
                 {
                   if ((bTLSInUse)||(checkOpenConnections()>=4))
-                    //Bear SSL only support 1 TLS connection on ESP limited RAM
+                    //TODO: can we have more than 1 TLS connection on ESP32?
                     SendResponse(btCommand,UNAPI_ERR_NO_FREE_CONN,0,0);
                   else
                   {
@@ -1797,26 +1931,21 @@ proccesscmd:
                     for (uiForHelper=0;uiForHelper<4;uiForHelper++)
                       if (btConnections[uiForHelper] == CONN_CLOSED)
                         break;
-                    btCMDConnNumber = uiForHelper+1;
-  
+                    btCMDConnNumber = uiForHelper+1;  
                     bTLSInUse = btCMDConnNumber;                  
-                    ClientList[uiForHelper] = new BearSSL::WiFiClientSecure();
-                    TClient1 = (BearSSL::WiFiClientSecure*)ClientList[uiForHelper];
+                    ClientList[uiForHelper] = new WiFiClientSecure();
+                    TClient1 = (WiFiClientSecure*)ClientList[uiForHelper];
                     ClientList[uiForHelper]->setNoDelay(!stDeviceConfiguration.ucNagle);
                     
                     if (btCMDPassive&8) //validate certificates?
                     {
-                      if (!bCertStoreInit)
-                      {
-                        bCertStoreInit = InitCertificates();
-                      }
-                      TClient1->setCertStore(&certStore);
+					            loadCACertForClient(TClient1);
                     }               
                     else
                       TClient1->setInsecure();
                     
                     if (bHasHostName)
-                      btCMDBeginRet = TClient1->connect(externalIP,uiCMDRemotePort,(const char*)uchTLSHost);
+                      btCMDBeginRet = TClient1->connect((const char*)uchTLSHost, uiCMDRemotePort);
                     else
                       btCMDBeginRet = TClient1->connect(externalIP,uiCMDRemotePort);
   
@@ -1824,63 +1953,29 @@ proccesscmd:
                     {                  
                       uiLocalPorts[uiForHelper] = TClient1->localPort();
                       uiRemotePorts[uiForHelper] = TClient1->remotePort();
-                      if (btCMDConnNumber==1)
-                      {
-                        btIPConnection1[0]=externalIP[0];
-                        btIPConnection1[1]=externalIP[1];
-                        btIPConnection1[2]=externalIP[2];
-                        btIPConnection1[3]=externalIP[3];
-                      }
-                      else if (btCMDConnNumber==1)
-                      {
-                        btIPConnection2[0]=externalIP[0];
-                        btIPConnection2[1]=externalIP[1];
-                        btIPConnection2[2]=externalIP[2];
-                        btIPConnection2[3]=externalIP[3];
-                      }
-                      else if (btCMDConnNumber==1)
-                      {
-                        btIPConnection3[0]=externalIP[0];
-                        btIPConnection3[1]=externalIP[1];
-                        btIPConnection3[2]=externalIP[2];
-                        btIPConnection3[3]=externalIP[3];
-                      }
-                      else
-                      {
-                        btIPConnection4[0]=externalIP[0];
-                        btIPConnection4[1]=externalIP[1];
-                        btIPConnection4[2]=externalIP[2];
-                        btIPConnection4[3]=externalIP[3];
-                      }
-  
+                      switch (btCMDConnNumber) 
+					            {
+                        case 1: ipToBytes(externalIP, btIPConnection1); break;
+                        case 2: ipToBytes(externalIP, btIPConnection2); break;
+                        case 3: ipToBytes(externalIP, btIPConnection3); break;
+                        case 4: ipToBytes(externalIP, btIPConnection4); break;
+                      }  
                       btConnections[uiForHelper] = CONN_TCP_TLS_A;
                       btIsTransient[uiForHelper] = btCMDTransient;                  
                       SendResponse(btCommand,UNAPI_ERR_OK,1,&btCMDConnNumber);
                     }
                     else
-                    {                                        
-                      switch (TClient1->getLastSSLError())
-                      {
-                        case BR_ERR_BAD_SIGNATURE:
-                        case BR_ERR_X509_BAD_SIGNATURE:
-                          btCommandData[0]=10; // Invalid server certificate
-                        break;
-                        case BR_ERR_X509_BAD_SERVER_NAME:
-                          btCommandData[0]=11; // Invalid server certificate, host name did not match
-                        break;
-                        default:
-                          btCommandData[0]=19; //TLS Other
-                        break;
-                      }
+                    {
+					            // TODO: instead of always returning ERR_TLS_OTHER, can we figure out error reason?
+                      btCommandData[0] = 19;
                       delete ClientList[uiForHelper];
                       ClientList[uiForHelper] = NULL;
                       bTLSInUse = 0;
-                      SendResponse(btCommand,UNAPI_ERR_NO_CONN,1,btCommandData);
+                      SendResponse(btCommand, UNAPI_ERR_NO_CONN, 1, btCommandData);
                     }
                   }
                 }
                 else //regular TCP   
-#endif
                 {
                   //clear, so active connection
                   if (checkOpenConnections()<4) 
@@ -1897,32 +1992,12 @@ proccesscmd:
                     {
                       uiLocalPorts[uiForHelper] = ClientList[uiForHelper]->localPort();
                       uiRemotePorts[uiForHelper] = ClientList[uiForHelper]->remotePort();
-                      switch (btCMDConnNumber)
-                      {
-                        case 1:
-                            btIPConnection1[0]=externalIP[0];
-                            btIPConnection1[1]=externalIP[1];
-                            btIPConnection1[2]=externalIP[2];
-                            btIPConnection1[3]=externalIP[3];
-                        break;
-                        case 2:
-                            btIPConnection2[0]=externalIP[0];
-                            btIPConnection2[1]=externalIP[1];
-                            btIPConnection2[2]=externalIP[2];
-                            btIPConnection2[3]=externalIP[3];
-                        break;
-                        case 3:
-                            btIPConnection3[0]=externalIP[0];
-                            btIPConnection3[1]=externalIP[1];
-                            btIPConnection3[2]=externalIP[2];
-                            btIPConnection3[3]=externalIP[3];
-                        break;
-                        case 4:
-                            btIPConnection4[0]=externalIP[0];
-                            btIPConnection4[1]=externalIP[1];
-                            btIPConnection4[2]=externalIP[2];
-                            btIPConnection4[3]=externalIP[3];
-                        break;
+                      switch (btCMDConnNumber) 
+					            {
+                        case 1: ipToBytes(externalIP, btIPConnection1); break;
+                        case 2: ipToBytes(externalIP, btIPConnection2); break;
+                        case 3: ipToBytes(externalIP, btIPConnection3); break;
+                        case 4: ipToBytes(externalIP, btIPConnection4); break;
                       }
                       btConnections[uiForHelper] = CONN_TCP_ACTIVE;
                       btIsTransient[uiForHelper] = btCMDTransient;  
@@ -2345,6 +2420,11 @@ proccesscmd:
 void loop() {  
   unsigned int uiI;
 
+  if (bDisableRadioPending) {
+    bDisableRadioPending = false;
+    DisableRadio();
+  }
+
   if (Serial.available())
     received_data_parser();
 
@@ -2368,91 +2448,25 @@ void loop() {
   for (uiI=1;uiI<5;uiI++)
   {
     yield();
-    if (btConnections[uiI-1] == CONN_TCP_PASSIVE)
+    if (btConnections[uiI-1] == CONN_TCP_PASSIVE && ServerList[uiI-1] != NULL)
     {
-      switch (uiI)
-      {                  
-        case 1:
-          if (ClientList[uiI-1]==NULL)
-          {
-            if (ServerList[uiI-1])            
-              Client1 = ServerList[uiI-1]->available();
-            if (Client1)
-              ClientList[uiI-1] = &Client1;
-            else
-              ClientList[uiI-1] = NULL;
-          }
-          if ((ClientList[uiI-1]!=NULL)&&(uiRemotePorts[uiI-1]==0))
-          {
-              externalIP = ClientList[uiI-1]->remoteIP();
-              uiRemotePorts[0]=ClientList[uiI-1]->remotePort();
-              btIPConnection1[0]=externalIP[0];
-              btIPConnection1[1]=externalIP[1];
-              btIPConnection1[2]=externalIP[2];
-              btIPConnection1[3]=externalIP[3];            
-          }
-        break;
-        case 2:
-          if (ClientList[uiI-1]==NULL)
-          {
-            if (ServerList[uiI-1])            
-              Client2 = ServerList[uiI-1]->available();
-            if (Client2)
-              ClientList[uiI-1] = &Client2;
-            else
-              ClientList[uiI-1] = NULL;
-          }
-          if ((ClientList[uiI-1]!=NULL)&&(uiRemotePorts[uiI-1]==0))
-          {
-              externalIP = ClientList[uiI-1]->remoteIP();
-              uiRemotePorts[0]=ClientList[uiI-1]->remotePort();
-              btIPConnection2[0]=externalIP[0];
-              btIPConnection2[1]=externalIP[1];
-              btIPConnection2[2]=externalIP[2];
-              btIPConnection2[3]=externalIP[3];            
-          }
-        break;
-        case 3:
-          if (ClientList[uiI-1]==NULL)
-          {
-            if (ServerList[uiI-1])            
-              Client3 = ServerList[uiI-1]->available();
-            if (Client3)
-              ClientList[uiI-1] = &Client3;
-            else
-              ClientList[uiI-1] = NULL;
-          }
-          if ((ClientList[uiI-1]!=NULL)&&(uiRemotePorts[uiI-1]==0))
-          {
-              externalIP = ClientList[uiI-1]->remoteIP();
-              uiRemotePorts[0]=ClientList[uiI-1]->remotePort();
-              btIPConnection3[0]=externalIP[0];
-              btIPConnection3[1]=externalIP[1];
-              btIPConnection3[2]=externalIP[2];
-              btIPConnection3[3]=externalIP[3];            
-          }
-        break;
-        case 4:
-          if (ClientList[uiI-1]==NULL)
-          {
-            if (ServerList[uiI-1])            
-              Client4 = ServerList[uiI-1]->available();
-            if (Client4)
-              ClientList[uiI-1] = &Client4;
-            else
-              ClientList[uiI-1] = NULL;
-          }
-          if ((ClientList[uiI-1]!=NULL)&&(uiRemotePorts[uiI-1]==0))
-          {
-              externalIP = ClientList[uiI-1]->remoteIP();
-              uiRemotePorts[0]=ClientList[uiI-1]->remotePort();
-              btIPConnection4[0]=externalIP[0];
-              btIPConnection4[1]=externalIP[1];
-              btIPConnection4[2]=externalIP[2];
-              btIPConnection4[3]=externalIP[3];            
-          }
-        break;
-      }
+       WiFiClient newClient = ServerList[uiI-1]->available();
+		if (newClient) 
+		{
+			if (ClientList[uiI-1] == NULL) 
+			{
+				ClientList[uiI-1] = new WiFiClient(newClient);
+				externalIP = newClient.remoteIP();
+				uiRemotePorts[uiI-1] = newClient.remotePort();
+				switch (uiI) 
+				{
+					case 1: ipToBytes(externalIP, btIPConnection1); break;
+					case 2: ipToBytes(externalIP, btIPConnection2); break;
+					case 3: ipToBytes(externalIP, btIPConnection3); break;
+					case 4: ipToBytes(externalIP, btIPConnection4); break;
+				}
+			}
+        }    
     }
   }  
 }

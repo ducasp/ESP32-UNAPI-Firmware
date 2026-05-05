@@ -124,6 +124,7 @@ static WiFiClient *stream = NULL;
 static unsigned int http_chunk_size = 0;
 static unsigned int http_chunk_header_idx = 0;
 static unsigned long longTimeOut2;
+uint8_t buffer[1024];
 
 // ======================== Helper Functions ========================
 void WaitConnectionIfNeeded(bool bFastReturn);
@@ -1021,6 +1022,9 @@ void received_data_parser () {
               else
               {
                 SendQuickResponse(btCommand,UNAPI_ERR_OK);
+                // On ESP32 - C6 if not waiting a little, the response sent is corrupted or not even sent
+                Serial.flush();
+                delay(100);
                 bSerialUpdateInProgress = false;
                 ESP.restart();
               }
@@ -1493,18 +1497,67 @@ proccesscmd:
                 yield();
                 stOTAServer = (const char*)ucOTAServer;
                 stOTAFile = (const char*)ucOTAFile;
-                httpUpdate.rebootOnUpdate(false);
-                if (btCommand == CUSTOM_F_UPDATE_FW)
-                  OTAret = httpUpdate.update(OTAclient, stOTAServer, uiOTAPort, stOTAFile);
-                else
-                  OTAret = httpUpdate.update(OTAclient, stOTAServer, uiOTAPort, stOTAFile);
-                if (OTAret==HTTP_UPDATE_OK)
-                  SendQuickResponse(btCommand,0);
-                else
-                  SendQuickResponse(btCommand,UNAPI_ERR_NO_DATA);
+                if (btCommand == CUSTOM_F_UPDATE_FW) {
+                  httpUpdate.rebootOnUpdate(false);                
+                  OTAret = httpUpdate.update(OTAclient, stOTAServer, uiOTAPort, stOTAFile, chVer);
+                  if (OTAret==HTTP_UPDATE_OK)
+                    SendQuickResponse(btCommand,0);
+                  else if (OTAret==HTTP_UPDATE_NO_UPDATES)
+                    SendQuickResponse(btCommand,UNAPI_ERR_INV_OPER);
+                  else
+                    SendQuickResponse(btCommand,UNAPI_ERR_NO_DATA);
+                } else {
+                  // lets simply download the cert file
+                  http.begin(stOTAServer+stOTAFile);
+                  if (http.GET() == HTTP_CODE_OK) {
+                    g_certUploadFile = FFat.open("/cert_upload.tmp", FILE_WRITE);
+                    if (!g_certUploadFile) {
+                        SendQuickResponse(btCommand, UNAPI_ERR_NO_DATA);
+                    }
+                    else {
+                      // Stream data from web to file
+                      stream = http.getStreamPtr();
+                      while (http.connected() && (http.getSize() > 0 || http.getSize() == -1)) {
+                          size_t size = stream->available();
+                          if (size) {
+                              int c = stream->readBytes(buffer, ((size > sizeof(buffer)) ? sizeof(buffer) : size));
+                              g_certUploadFile.write(buffer, c);
+                          }
+                      }
+                      g_certUploadFile.close();
+                      // File received, now lets do the magic
+                      char header[12] = {0};
+                      size_t headerRead = 0;
+                      File tt = FFat.open("/cert_upload.tmp", "r");
+                      if (tt)
+                      {
+                        headerRead = tt.readBytes(header, 11);
+                        tt.close();
+                        const char* ttargetPath = "/certs.bin";  // mbedTLS bundle (default)
+                        if (headerRead >= 11 && memcmp(header, "-----BEGIN ", 11) == 0)
+                          ttargetPath = "/ca.pem";               // PEM text
+
+                        if (FFat.exists(ttargetPath)) FFat.remove(ttargetPath);
+                        if (FFat.rename("/cert_upload.tmp", ttargetPath))
+                        {
+                          // Drop in-memory cached certs so loadCACertForClient() reloads
+                          if (g_caPem)    { free(g_caPem);    g_caPem = NULL;    g_caPemLen = 0; }
+                          if (g_caBundle) { free(g_caBundle); g_caBundle = NULL; g_caBundleLen = 0; }
+                          SendQuickResponse(btCommand, UNAPI_ERR_OK);
+                          // No ESP.restart() — cert update is hot-applied.
+                        }
+                        else
+                          SendQuickResponse(btCommand, UNAPI_ERR_NO_DATA);
+                      }
+                      else
+                        SendQuickResponse(btCommand, UNAPI_ERR_NO_DATA);
+                    }
+                  }
+                  else
+                    SendQuickResponse(btCommand, UNAPI_ERR_NO_DATA);
+                }
               }
             }
-
             if(!bOkParam)
               SendQuickResponse(btCommand,UNAPI_ERR_INV_PARAM);
           }

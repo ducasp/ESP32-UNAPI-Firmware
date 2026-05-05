@@ -1508,8 +1508,9 @@ proccesscmd:
                     SendQuickResponse(btCommand,UNAPI_ERR_NO_DATA);
                 } else {
                   // lets simply download the cert file
-                  http.begin(stOTAServer+stOTAFile);
-                  if (http.GET() == HTTP_CODE_OK) {
+                  http.begin(OTAclient, stOTAServer, uiOTAPort, stOTAFile, chVer);
+                  int httpCode = http.GET();
+                  if (httpCode == HTTP_CODE_OK) {
                     g_certUploadFile = FFat.open("/cert_upload.tmp", FILE_WRITE);
                     if (!g_certUploadFile) {
                         SendQuickResponse(btCommand, UNAPI_ERR_NO_DATA);
@@ -1553,8 +1554,13 @@ proccesscmd:
                         SendQuickResponse(btCommand, UNAPI_ERR_NO_DATA);
                     }
                   }
-                  else
-                    SendQuickResponse(btCommand, UNAPI_ERR_NO_DATA);
+                  else {
+                    // if not available means version is fine
+                    if  ((httpCode == HTTP_CODE_NO_CONTENT) || (httpCode == HTTP_CODE_NOT_MODIFIED))
+                      SendQuickResponse(btCommand,UNAPI_ERR_INV_OPER);
+                    else
+                      SendQuickResponse(btCommand, UNAPI_ERR_NO_DATA);
+                  }
                 }
               }
             }

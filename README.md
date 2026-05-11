@@ -23,10 +23,17 @@ Choose the proper ESP32 module/board you are targeting.
 
 To generate certificate files, use the script available at:
 
-https://github.com/espressif/esp-idf/blob/master/components/mbedtls/esp_crt_bundle/gen_crt_bundle.py
+https://github.com/esp8266/Arduino/tree/master/libraries/ESP8266WiFi/examples/BearSSL_CertStore
 
-To get the certificates in a single file. That file can be renamed to CERTS.BIN and used to send to
-the device using suitable software (i.e.: cfg8266 or esp32 equivalent).
+To get the certificates in a single certs.ar file. That file goes to the /data folder of your 
+Arduino IDE project, and you can generate the file system using the following plugin:
+
+https://github.com/esp8266/arduino-esp8266fs-plugin
+
+Just enable logging on your Arduino IDE, and after uploading the filesystem, you can get in the log
+where the plugin created the bin file to upload to the ESP8266. Copy that file before closing the
+IDE and that is the file used for OTA or LOCAL update of certificates. There are different ways to
+do it, but that is the one that worked for me, can't recommend or support other methods. :stuck_out_tongue_closed_eyes:
 
 # Project Design Constraints
 

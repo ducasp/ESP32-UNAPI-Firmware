@@ -37,10 +37,7 @@ along with this file.  If not, see <https://www.gnu.org/licenses/>
 #define _UNAPIESP_H
 
 #define MAX_CMD_DATA_LEN 2148
-//Uncomment ONLY the board you are targeting
-#define ESP_C6_BOARD
-//#define ESP_S3_BOARD
-#define ALLOW_TLS
+#include "ESP32BOARDS.h"
 
 struct ESPConfig {
   unsigned char ucConfigFileName[8];

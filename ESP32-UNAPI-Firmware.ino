@@ -125,6 +125,7 @@ static unsigned int http_chunk_size = 0;
 static unsigned int http_chunk_header_idx = 0;
 static unsigned long longTimeOut2;
 uint8_t buffer[1024];
+bool bRS232UpdateAllowed = false;
 
 // ======================== Helper Functions ========================
 void WaitConnectionIfNeeded(bool bFastReturn);
@@ -133,51 +134,20 @@ void RadioUpdateStatus();
 void ScheduleTimeoutCheck();
 bool CacheCertificates();
 
-// ======================== ONBOARD WIFI-CONNECTED LED ========================
-// Blue led if STA has an IP. "WiFi up"
-// firmware OTA it should reconnect on its own after reboot
-//
-// Configure for your board:
-//   WIFI_LED_PIN   pin number (LED_BUILTIN if WS2812 RGB on GPIO 48)
-//   WIFI_LED_RGB   set to 1 if the onboard LED is a WS2812
-//   WIFI_LED_ON    HIGH/LOW
-#define USE_WIFI_LED
-#ifndef WIFI_LED_PIN
-  #ifdef ESP_S3_BOARD
-    #define WIFI_LED_PIN  48      // ESP32-S3-Dev: WS2812 on GPIO 48
-  #endif
-  #ifdef ESP_C6_BOARD
-    #define WIFI_LED_PIN  8      // ESP32-C6-Dev: WS2812 on GPIO 8
-  #endif
-#endif    
-#ifndef WIFI_LED_RGB
-  #define WIFI_LED_RGB  1       // 1 = WS2812; 0 = plain GPIO LED
-#endif
-#ifndef WIFI_LED_ON
-  #ifdef ESP_S3_BOARD
-    #define WIFI_LED_ON   HIGH
-  #endif
-  #ifdef ESP_C6_BOARD
-    #define WIFI_LED_ON   HIGH
-  #endif
-#endif
-
 static inline void wifiLedSet(bool on) {
 #ifdef USE_WIFI_LED
-#if WIFI_LED_RGB
-  // blue at 50% = connected (R=0, G=0, B=128)
-  rgbLedWrite(WIFI_LED_PIN, 0, 0, on ? 128 : 0);
-#else
-  digitalWrite(WIFI_LED_PIN, on ? WIFI_LED_ON : !WIFI_LED_ON);
-#endif
+  if (WIFI_LED_RGB)
+    // blue at 50% = connected (R=0, G=0, B=128)
+    rgbLedWrite(WIFI_LED_PIN, 0, 0, on ? 128 : 0);
+  else
+    digitalWrite(WIFI_LED_PIN, on ? WIFI_LED_ON : !WIFI_LED_ON);
 #endif
 }
 
 static inline void wifiLedInit() {
 #ifdef USE_WIFI_LED
-#if !WIFI_LED_RGB
-  pinMode(WIFI_LED_PIN, OUTPUT);
-#endif
+  if (!WIFI_LED_RGB)
+    pinMode(WIFI_LED_PIN, OUTPUT);
   wifiLedSet(false);
 #endif
 }
@@ -413,11 +383,13 @@ byte checkOpenConnections() {
 void setup() {
   WiFi.persistent(true);
   EEPROM.begin(32);
-  Serial.begin(859372);
+  Serial.begin(ESP32BAUDRATE);
   Serial.setRxBufferSize(2148);
   Serial.setTimeout(1);
   Serial.print("TCP-IP UNAPI ESP32 v");
-  Serial.println(chVer);
+  Serial.print(chVer);
+  Serial.print(" ");
+  Serial.println(FIRMWARETYPE);
   Serial.println("(c) 2019-2026 Oduvaldo Pavan Junior - ducasp@gmail.com");
   validateConfigFile();
   longReadyTimeOut = 0;
@@ -919,6 +891,7 @@ void received_data_parser () {
   byte bAutoIPConfig=0;
   uint32_t bin_flash_size;
   bool bScanReconnect = false;
+  bool bScanReconnectNeeded = false;
 
   if (!bInit)
   {
@@ -973,6 +946,9 @@ void received_data_parser () {
             WarmBoot();
             Serial.println("Ready");
           break;
+          case  CUSTOM_F_GETBOARD:
+            SendResponse (CUSTOM_F_GETBOARD, UNAPI_ERR_OK, sizeof(FIRMWARETYPE), (unsigned char*)FIRMWARETYPE);
+          break;
           case CUSTOM_F_END_RS232_UPDATE:
             if (!bSerialUpdateInProgress)
             {
@@ -1024,7 +1000,7 @@ void received_data_parser () {
                 SendQuickResponse(btCommand,UNAPI_ERR_OK);
                 // On ESP32 - C6 if not waiting a little, the response sent is corrupted or not even sent
                 Serial.flush();
-                delay(100);
+                delay(1000);
                 bSerialUpdateInProgress = false;
                 ESP.restart();
               }
@@ -1140,8 +1116,14 @@ void received_data_parser () {
             Serial.write(chVer[2]-'0');
             break;
           case CUSTOM_F_SCAN:
-            // ESP32 when with bad credentials will not scan unless you call disconnectds
-            WiFi.disconnect();
+            wl_status_t stScan;
+            stScan = WiFi.status();
+            if ((stScan != WL_CONNECTED) && (stScan != WL_IDLE_STATUS))
+            {
+              // ESP32 when with bad credentials will not scan unless you call disconnectds
+              WiFi.disconnect();
+              bScanReconnectNeeded = true;
+            }
             WiFi.scanNetworks(true,false);
             SendQuickResponse('S',0);
             break;
@@ -1171,7 +1153,7 @@ void received_data_parser () {
               bScanReconnect = true;
               Serial.write(UNAPI_ERR_NO_NETWORK); //no AP found found
             }
-            if (bScanReconnect) {
+            if (bScanReconnect && bScanReconnectNeeded) {
               WiFi.mode(WIFI_STA);
               WiFi.begin();
             }
@@ -1233,6 +1215,7 @@ void received_data_parser () {
           case CUSTOM_F_BLOCK_RS232_UPDATE:
           case CUSTOM_F_WIFI_ON_TIMER_SET:
           case CUSTOM_F_SET_AUTOCLOCK:
+          case CUSTOM_F_FILE_BOARD:
             btState = RX_PARSER_WAIT_DATA_SIZE;
             btCmdInternalStep = 0;
             break;
@@ -1283,6 +1266,16 @@ void received_data_parser () {
 proccesscmd:
       switch(btCommand)
       {
+        case CUSTOM_F_FILE_BOARD:
+          if (strcmp(FIRMWARETYPE,(const char*)btCommandData) == 0) {
+            bRS232UpdateAllowed = true;
+            SendQuickResponse(btCommand, UNAPI_ERR_OK);
+          }
+          else {
+            bRS232UpdateAllowed = false;
+            SendQuickResponse(btCommand,UNAPI_ERR_INV_PARAM);
+          }
+        break;
         case CUSTOM_F_START_RS232_UPDATE:
         case CUSTOM_F_START_RS232_CERT_UPDATE:
           if ((uiCmdDataLen !=12)||(bSerialUpdateInProgress))
@@ -1307,7 +1300,9 @@ proccesscmd:
             }
             else
             {
-              if (ulSerialUpdateSize > (ESP.getFreeSketchSpace() - 0x1000))
+              if (!bRS232UpdateAllowed)
+                SendQuickResponse(btCommand,UNAPI_ERR_INV_OPER);
+              else if (ulSerialUpdateSize > (ESP.getFreeSketchSpace() - 0x1000))
                 SendQuickResponse(btCommand,UNAPI_ERR_INV_PARAM);
               else
               {

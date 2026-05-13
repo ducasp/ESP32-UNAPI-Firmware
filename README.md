@@ -27,12 +27,16 @@ You will need Arduino IDE and install ESP32 Arduino IDE
 
 Choose the proper ESP32 module/board you are targeting.
 
-To generate certificates file, use the script available at:
+To generate certificates file, first get the most up to date certificate list in PEM format:
+
+https://curl.se/docs/caextract.html
+
+Then use the script available at:
 
 https://github.com/espressif/esp-idf/blob/master/components/mbedtls/esp_crt_bundle/gen_crt_bundle.py
 
-To get the certificates in a single certs.bin file. That file then is uploaded to ESP either using a
-tool like CFGESP / UPDTESP locally or through a web server.
+To get the certificates in a single bundle file. That file you can rename to certs.bin and then upload
+it to ESP using a tool like CFGESP / UPDTESP locally or through a web server.
 
 # Project Design Constraints
 

@@ -3,17 +3,23 @@
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/R6R2BRGX6)
 
 
-Two sample TCP IP UNAPI drivers that work along with this firmware
+Three sample TCP IP UNAPI drivers that work along with this firmware
 are available at:
 
-(ROM Version)
+(ROM / IO Version)
 https://github.com/ducasp/MSX-Development/tree/master/MSX-SM/WiFi/UNAPI_BIOS_CUSTOM_ESP_FIRMWARE
+
+(ROM / Memory Mapped IO Version)
+https://github.com/ducasp/MSX-Development/tree/master/MSXPICO/UNAPI_BIOS_CUSTOM_ESP_MSXPICO
 
 (RAM Version, requires Memory Mapper and RAMHELPR by Konamiman)
 https://github.com/ducasp/MSX-Development/tree/master/MSX-SM/WiFi/UNAPI_DRIVER_CUSTOM_ESP_FIRMWARE
 
-This application is an example of how to set configurations, scan and join networks or update firmware or certificates:
-https://github.com/ducasp/MSX-Development/tree/master/MSX-SM/WiFi/CFG8266
+This application is an example of how to set configurations, scan and join networks or update firmware or certificates on IO interface:
+https://github.com/ducasp/MSX-Development/tree/master/CFGESP
+
+Memory mapped IO interface version:
+https://github.com/ducasp/MSX-Development/tree/master/UPDTESP
 
 # How to build it
 
@@ -21,19 +27,12 @@ You will need Arduino IDE and install ESP32 Arduino IDE
 
 Choose the proper ESP32 module/board you are targeting.
 
-To generate certificate files, use the script available at:
+To generate certificates file, use the script available at:
 
-https://github.com/esp8266/Arduino/tree/master/libraries/ESP8266WiFi/examples/BearSSL_CertStore
+https://github.com/espressif/esp-idf/blob/master/components/mbedtls/esp_crt_bundle/gen_crt_bundle.py
 
-To get the certificates in a single certs.ar file. That file goes to the /data folder of your 
-Arduino IDE project, and you can generate the file system using the following plugin:
-
-https://github.com/esp8266/arduino-esp8266fs-plugin
-
-Just enable logging on your Arduino IDE, and after uploading the filesystem, you can get in the log
-where the plugin created the bin file to upload to the ESP8266. Copy that file before closing the
-IDE and that is the file used for OTA or LOCAL update of certificates. There are different ways to
-do it, but that is the one that worked for me, can't recommend or support other methods. :stuck_out_tongue_closed_eyes:
+To get the certificates in a single certs.bin file. That file then is uploaded to ESP either using a
+tool like CFGESP / UPDTESP locally or through a web server.
 
 # Project Design Constraints
 

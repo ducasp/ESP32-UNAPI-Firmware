@@ -24,24 +24,27 @@ Copyright (c) 2019 - 2026 Oduvaldo Pavan Junior ( ducasp@ gmail.com ) All rights
       9. [Get Access Point Status](#cgetapsts)
       10. [Update Firmware Over the Air](#cotafwupdt)
       11. [Update Certificates Over the Air](#cotacertupdt)
-      12. [Start Local Firmware Update](#clocalfwupdt)
-      13. [Start Local Certificate Update](#clocalcertupdt)
-      14. [Write Block](#clocalwriteblock)
-      15. [Finish Local Update](#clocalfinish)
-      16. [Initialize Certificates](#cinitcerts)
-      17. [Disable Nagle Algorithm](#cnagledis)
-      18. [Enable Nagle Algorithm](#cnagleen)
-      19. [Set Radio Off Time-Out](#cradiotimeout)
-      20. [Disable Radio](#cradiodisable)
-      21. [Get Settings](#cgetset)
-      22. [Get Auto Clock Settings](#cgetaclkset)
-      23. [Set Auto Clock Settings](#csetaclkset)
-      24. [Get Date and Time](#cgetdate)
-      25. [Hold Connection](#choldconn)
-      26. [Release Connection](#creleaseconn)
-      27. [Turn Wi-Fi Off](#cturnwifioff)
-      28. [Turn RS232 Off](#cturnrs232off)
-      29. [Clear AP from memory](#cclearap)
+      12. [Get the firmware type](#cgetfwtype)
+      13. [Set the firmware type indicated by Firmware Update File](#csetfilefwtype)
+      14. [Start Local Firmware Update](#clocalfwupdt)
+      15. [Start Local Certificate Update](#clocalcertupdt)
+      16. [Write Block](#clocalwriteblock)
+      17. [Finish Local Update](#clocalfinish)
+      18. [Initialize Certificates](#cinitcerts)
+      19. [Disable Nagle Algorithm](#cnagledis)
+      20. [Enable Nagle Algorithm](#cnagleen)
+      21. [Set Radio Off Time-Out](#cradiotimeout)
+      22. [Disable Radio](#cradiodisable)
+      23. [Get Settings](#cgetset)
+      24. [Set Baud Rate](#csetbaudrate)
+      25. [Get Auto Clock Settings](#cgetaclkset)
+      26. [Set Auto Clock Settings](#csetaclkset)
+      27. [Get Date and Time](#cgetdate)
+      28. [Hold Connection](#choldconn)
+      29. [Release Connection](#creleaseconn)
+      30. [Turn Wi-Fi Off](#cturnwifioff)
+      31. [Turn RS232 Off](#cturnrs232off)
+      32. [Clear AP from memory](#cclearap)
    2. [UNAPI Commands](#ucommands)
       1. [TCPIP_GET_CAPAB](#cugetcapab)
       2. [TCPIP_GET_IPINFO](#cugetipinfo)
@@ -368,7 +371,7 @@ This command will retrieve the current connection status and the Access Point na
 
 #### <a name="cotafwupdt"></a> Update Firmware Over the Air
 
-This command will connect to a given server (local or remote) to retrieve the firmware file and update it Over the Air. **NOTE:** this command may take considerable time to send the response depending upon connection speed and network traffic! A Reset command should be issued after a succesful update, and that reset will also take considerable time while it flashes the new firmware to the memory. I recommend no less than 20 seconds time-out for the command response and no less than 50 seconds time-out for the module to respond to commands after the Reset command.
+This command will connect to a given server (local or remote) to retrieve the firmware file and update it Over the Air. **NOTE:** this command may take considerable time to send the response depending upon connection speed and network traffic! A Reset command should be issued after a succesful update, and that reset will also take considerable time while it flashes the new firmware to the memory. I recommend no less than 20 seconds time-out for the command response and no less than 50 seconds time-out for the module to respond to commands after the Reset command. This command expects a server that will receive firmware type and version and return HTTP_OK only if it has a file for that firmware type that has a different version. Details available on the PDF document about ESP Update.
 
 *Input Parameters:* 
 
@@ -378,8 +381,7 @@ The OTA connection parameters, as follow:
 |:--------:| ------------------ | ------------------------------------------------------------------------------------------------ |
 | 0 - 1    | Port               | Port to be used to connect to the OTA server, LSB in position 0 and MSB in position 1            |
 | 2 - X    | Server IP or URL   | Up to 255 bytes long names are accepted (IP addresses won't reach that limit) for DNS resolution |
-| X+1      | Separator          | 0 - Null character, indicating the end of Server IP / URL                                        |
-| X+2 - Y  | File Path and Name | Path and name of the file to get from the OTA server for this firmware update                    |
+| X+1      | Terminator         | 0 - Null character, indicating the end of Server IP / URL                                        |
 
 *Command Structure:*
 
@@ -398,7 +400,7 @@ The OTA connection parameters, as follow:
 
 #### <a name="cotacertupdt"></a> Update Certificates Over the Air
 
-This command will connect to a given server (local or remote) to retrieve the certificates file and update it Over the Air. **NOTE:** this command may take considerable time to send the response depending upon connection speed and network traffic! A Reset command should be issued after a succesful update, and that reset will also take considerable time while it flashes the new file system with the new certificates to the memory. I recommend no less than 20 seconds time-out for the command response and no less than 50 seconds time-out for the module to respond to commands after the Reset command. Also, notice that if Initialize Certificates command is not sent after the module finish flashing the data, this initialization procedure will be done during the first SSL connection attempt, which most likely will cause that connection to time-out or take really long time to connect, I strongly recommend using the Initialize Certificates command after a succesful certificate update/module is responding to commands after the reset.
+This command will connect to a given server (local or remote) to retrieve the certificates file and update it Over the Air. **NOTE:** this command may take considerable time to send the response depending upon connection speed and network traffic! A Reset command should be issued after a succesful update, and that reset will also take considerable time while it flashes the new file system with the new certificates to the memory. I recommend no less than 20 seconds time-out for the command response and no less than 50 seconds time-out for the module to respond to commands after the Reset command. Also, notice that if Initialize Certificates command is not sent after the module finish flashing the data, this initialization procedure will be done during the first SSL connection attempt, which most likely will cause that connection to time-out or take really long time to connect, I strongly recommend using the Initialize Certificates command after a succesful certificate update/module is responding to commands after the reset. This command expects a server that will receive the sha-256 hash of the certificate bundle and return HTTP_OK only if it has a certificate bundle that has a different hash. Details available on the PDF document about ESP Update.
 
 *Input Parameters:* 
 
@@ -408,8 +410,7 @@ The OTA connection parameters, as follow:
 |:--------:| ------------------ | ------------------------------------------------------------------------------------------------ |
 | 0 - 1    | Port               | Port to be used to connect to the OTA server, LSB in position 0 and MSB in position 1            |
 | 2 - X    | Server IP or URL   | Up to 255 bytes long names are accepted (IP addresses won't reach that limit) for DNS resolution |
-| X+1      | Separator          | 0 - Null character, indicating the end of Server IP / URL                                        |
-| X+2 - Y  | File Path and Name | Path and name of the file to get from the OTA server for this certificate update                 |
+| X+1      | Terminator         | 0 - Null character, indicating the end of Server IP / URL                                        |
 
 *Command Structure:*
 
@@ -426,9 +427,57 @@ The OTA connection parameters, as follow:
 | 0        | CMD_BYTE   | 'U'                                                                                                                                                                                                                                                                                            |
 | 1        | Error Code | 0 - Ok, file was saved and update will occur on next reset<br/>2 - Could not connect to the AP<br/>3 - Could not retrieve the file using the given input parameters<br/>4 - Invalid parameters: too large URL/IP or no terminator on the URL/IP, not enough input data, missing File Path/Name<br/>15 - Up to date: remote server has the capability of evaluating firmware version and found there is no updated version for you |
 
+#### <a name="cgetfwtype"></a> Get the firmware type
+
+This command is used to read the firmware type that is flashed on the device. **DO NOT USE THIS RESPONSE TO UNLOCK FIRMWARE UPDATE OVER SERIAL!** This will defeat the purpose of the validation if the .bin file is meant for the device.
+
+*Input Parameters:* none
+
+*Command Structure:*
+
+| Position | Function          | Value                                                               |
+|:--------:| ----------------- | ------------------------------------------------------------------- |
+| 0        | CMD_BYTE          | 'b'                                                                 |
+
+*Response Structure:*
+
+| Position | Function   | Value                                                                                                                                                                                             |
+|:--------:| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0        | CMD_BYTE   | 'B'                                                                                                                                                                                               |
+| 1        | Error Code    | 0 - Ok                                                                                                                          |
+| 2 - 3    | Response Size | 16 bits value (MSB LSB) indicating the size of the response                                                                     |
+| 4 - X    | Firmware Type | Firmware Type flashed in the device, a NULL (0) terminated string                                                                |
+
+#### <a name="csetfilefwtype"></a> Set the firmware type indicated by Firmware Update File
+
+This command is used to send the firmware type that is written on the .dat file that is sent along with the .bin firmware file. Device will evaluate if it is the correct type and if it is, unlock the command to start update over serial communication. If it is not it will return invalid parameter and update over serial communication will remain locked.
+
+*Input Parameters:* 
+
+The firmware type parameters, as follow:
+
+| Position | Function    | Value                                                                                              |
+|:--------:| ----------- | -------------------------------------------------------------------------------------------------- |
+| 0 - X    | FW Type     | FW Type as indicated on .dat file                                                                  |
+
+*Command Structure:*
+
+| Position | Function          | Value                                                               |
+|:--------:| ----------------- | ------------------------------------------------------------------- |
+| 0        | CMD_BYTE          | 'B'                                                                 |
+| 1-2      | INPUT_PARAMS_SIZE | 16 bits value (MSB LSB) indicating the size of the input parameters |
+| 3-X      | INPUT_PARAMS      | Input parameters                                                    |
+
+*Response Structure:*
+
+| Position | Function   | Value                                                                                                                                                                                             |
+|:--------:| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0        | CMD_BYTE   | 'B'                                                                                                                                                                                               |
+| 1        | Error Code | 0 - Ok, firmware update over serial communication unlocked<br/>4 - Invalid parameters: firmware type incorrect for the device |
+
 #### <a name="clocalfwupdt"></a> Start Local Firmware Update
 
-This command will request the firmware to start the procedures for local firmware update, whose firmware file will be transmitted through commands. This command will evaluate if the firmware file appears correct and allow the procedure to start or not.
+This command will request the firmware to start the procedures for local firmware update, whose firmware file will be transmitted through commands. This command will evaluate if the firmware file appears correct and allow the procedure to start or not. Note: the firmware file firmware type MUST BE SENT before using the command "Set File Firmware Type", otherwise starting the update will fail for security reasons (to avoid legacy ESP8266 only software trying to upload ESP8266 firmware)
 
 *Input Parameters:* 
 
@@ -452,7 +501,7 @@ The firmware file parameters, as follow:
 | Position | Function   | Value                                                                                                                                                                                             |
 |:--------:| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0        | CMD_BYTE   | 'Z'                                                                                                                                                                                               |
-| 1        | Error Code | 0 - Ok, file is accepted and can continue transmission of firmware file using Write Block command<br/>4 - Invalid parameters: file is too large or its header is not valid, not enough input data |
+| 1        | Error Code | 0 - Ok, file is accepted and can continue transmission of firmware file using Write Block command<br/>4 - Invalid parameters: file is too large or its header is not valid, not enough input data<br/>15 - Invalid operation: file firmware type was not set, or the firmware file type set is not correct for this device |
 
 #### <a name="clocalcertupdt"></a> Start Local Certificates Update
 
@@ -674,6 +723,32 @@ This command will retrieve the current Auto Clock setting and the GMT Offset Adj
 | 2 - 3    | Response Size      | 16 bits value (MSB LSB) indicating the size of the response                                                                                                                  |
 | 4        | Auto Clock Setting | 0 - Normal Operation, No Auto Clock<br/>1 - Normal Operation, Try to Auto Set the Clock<br/>2 - Same as 1, but turn off radio after doing it<br/>3 - Disable Radio and UNAPI |
 | 5        | GMT Offset Adjust  | Signed byte indicating GMT Offset in hours                                                                                                                                   |
+#### <a name="csetbaudrate"></a> Set Baud Rate
+
+This command will save the desired Baud Rate in the configuration and after sending the response the device will immediately communicate at that speed. **CAUTION:** this should not be used by end users, only by manufacturers that want to use other baud rates
+
+*Input Parameters:* 
+
+The Baud Rate settings, as follow:
+
+| Position | Function           | Value                                                                                                                                                                        |
+|:--------:| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0        | Baud Rate          | 0 - 9600 bps<br/>1 - 19200 bps<br/>2 - 57600 bps<br/>3 - 115200 bps<br/>4 - 230400 bps<br/>5 - 460800 bps<br/>6 - 921600 bps<br/>7 - 859372 bps |
+
+*Command Structure:*
+
+| Position | Function          | Value                                                               |
+|:--------:| ----------------- | ------------------------------------------------------------------- |
+| 0        | CMD_BYTE          | 'd'                                                                 |
+| 1-2      | INPUT_PARAMS_SIZE | 16 bits value (MSB LSB) indicating the size of the input parameters |
+| 3        | INPUT_PARAMS      | Input parameters                                                    |
+
+*Response Structure:*
+
+| Position | Function   | Value                                                                                               |
+|:--------:| ---------- | --------------------------------------------------------------------------------------------------- |
+| 0        | CMD_BYTE   | 'd'                                                                                                 |
+| 1        | Error Code | 0 - Ok, new settings saved<br/>4 - Invalid parameters: not enough input data or values out of range |
 
 #### <a name="csetaclkset"></a> Set Auto Clock Settings
 

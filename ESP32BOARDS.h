@@ -44,26 +44,31 @@ PIN and type of led use.
 #ifndef _ESP32BOARDS_H
 #define _ESP32BOARDS_H
 
-//Baud Rates
-#define B9600 9600
-#define B19200 19200
-#define B57600 57600
-#define B115200 115200
-#define B230400 230400
-#define B460800 460800
-#define B921600 921600
-#define B859372 859372
-
-//Choose the default baud rate
-//Notice that if replacing a legacy ESP-01 on MSX FPGA or MSX PICO, the default is 859372 for it
-//Notice that in my tests 859372 did not work nicely with ESP32-WROOM but worked fine with ESP32C6 and S3
-//921600 should work nice on all of them
-#define ESP32BAUDRATE B859372
+enum SupportedBaudRates {
+  BR9600 = 0,
+  BR19200 = 1,
+  BR57600 = 2,
+  BR115200 = 3,
+  BR230400 = 4,
+  BR460800 = 5,
+  BR921600 = 6,
+  BR859372 = 7
+};
 
 //Uncomment ONLY the ESP Model you are targetting
 #define ESP32_C6
 //#define ESP32_S3
 //#define ESP32_WROOM
+
+//Choose the default baud rate
+//Notice that if replacing a legacy ESP-01 on MSX FPGA or MSX PICO, the default is 859372 for it
+//Notice that in my tests 859372 did not work nicely with ESP32-WROOM but worked fine with ESP32C6 and S3
+//921600 should work nice on all of them
+#ifdef ESP32_WROOM
+  #define ESP32BAUDRATE BR921600
+#else
+  #define ESP32BAUDRATE BR859372
+#endif
 
 //Uncomment ONLY the Flash Size you are targetting
 //#define FLASH_4M
@@ -72,37 +77,37 @@ PIN and type of led use.
 
 #ifdef ESP32_S3
   #ifdef FLASH_4M
-    #define FIRMWARETYPE "ESP32S3-4M"
+    #define FIRMWARETYPE "UN32S304"
   #endif
   #ifdef FLASH_8M
-    #define FIRMWARETYPE "ESP32S3-8M"
+    #define FIRMWARETYPE "UN32S308"
   #endif
   #ifdef FLASH_16M
-    #define FIRMWARETYPE "ESP32S3-16M"
+    #define FIRMWARETYPE "UN32S316"
   #endif
 #endif
 
 #ifdef ESP32_C6
   #ifdef FLASH_4M
-    #define FIRMWARETYPE "ESP32C6-4M"
+    #define FIRMWARETYPE "UN32C604"
   #endif
   #ifdef FLASH_8M
-    #define FIRMWARETYPE "ESP32C6-8M"
+    #define FIRMWARETYPE "UN32C608"
   #endif
   #ifdef FLASH_16M
-    #define FIRMWARETYPE "ESP32C6-16M"
+    #define FIRMWARETYPE "UN32C616"
   #endif
 #endif
 
 #ifdef ESP32_WROOM
   #ifdef FLASH_4M
-    #define FIRMWARETYPE "ESP32WROOM-4M"
+    #define FIRMWARETYPE "UN32WR04"
   #endif
   #ifdef FLASH_8M
-    #define FIRMWARETYPE "ESP32WROOM-8M"
+    #define FIRMWARETYPE "UN32WR08"
   #endif
   #ifdef FLASH_16M
-    #define FIRMWARETYPE "ESP32WROOM-16M"
+    #define FIRMWARETYPE "UN32WR16"
   #endif
 #endif
 

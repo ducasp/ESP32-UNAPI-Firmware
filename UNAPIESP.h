@@ -47,6 +47,8 @@ struct ESPConfig {
   unsigned int uiRadioOffTimer;
   unsigned char ucAutoClock;
   int iGMT;
+  unsigned char ucBaudRate;
+  unsigned char ucAutoUpdateFH;
 };
 
 enum CommandTypes {
@@ -79,6 +81,7 @@ enum CustomFunctions {
   CUSTOM_F_CLEAR_AP = 'a',
   CUSTOM_F_GETBOARD = 'b',
   CUSTOM_F_FILE_BOARD = 'B',
+  CUSTOM_F_SETBAUD = 'd',
   CUSTOM_F_UPDATE_FW = 'U',
   CUSTOM_F_UPDATE_CERTS = 'u',
   CUSTOM_F_GET_VER = 'V',

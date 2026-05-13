@@ -56,6 +56,7 @@ v1.1 (Merging with Leo Manes ESP32 Port)
 #include <time.h>
 #include <EEPROM.h>
 #include "HTTPClient.h"
+#include "mbedtls/md.h"
 
 #define HTTP_PACKET_SIZE 2048
 
@@ -68,7 +69,7 @@ unsigned char bTLSInUse = 0;
 unsigned char uchTLSHost[256];
 bool bHasHostName = false;
 
-const char chVer[4] = "1.1";
+const char chVer[4] = "1.0";
 byte btConnections[4] = {CONN_CLOSED,CONN_CLOSED,CONN_CLOSED,CONN_CLOSED};
 //UDP Objects
 WiFiUDP Udp1, Udp2, Udp3, Udp4;
@@ -125,7 +126,9 @@ static unsigned int http_chunk_size = 0;
 static unsigned int http_chunk_header_idx = 0;
 static unsigned long longTimeOut2;
 uint8_t buffer[1024];
-bool bRS232UpdateAllowed = false;
+static bool bRS232UpdateAllowed = false;
+static byte shaResult[32];
+static bool bShaOk = false;
 
 // ======================== Helper Functions ========================
 void WaitConnectionIfNeeded(bool bFastReturn);
@@ -133,6 +136,7 @@ void DisableRadio();
 void RadioUpdateStatus();
 void ScheduleTimeoutCheck();
 bool CacheCertificates();
+void CertificatesHash(size_t certsSize, unsigned char * certBuff);
 
 static inline void wifiLedSet(bool on) {
 #ifdef USE_WIFI_LED
@@ -325,7 +329,7 @@ bool validateConfigFile() {
   &&(stDeviceConfiguration.ucConfigFileName[6]=='P')&&(stDeviceConfiguration.ucConfigFileName[7]=='I'))
     bReturn = true;
 
-  if ((!bReturn)||(stDeviceConfiguration.ucStructVersion<2))
+  if ((!bReturn)||(stDeviceConfiguration.ucStructVersion<3))
   {
     if (!bReturn)
     {
@@ -337,20 +341,33 @@ bool validateConfigFile() {
       stDeviceConfiguration.ucConfigFileName[5]='A';
       stDeviceConfiguration.ucConfigFileName[6]='P';
       stDeviceConfiguration.ucConfigFileName[7]='I';
-      stDeviceConfiguration.ucStructVersion = 2;
+      stDeviceConfiguration.ucStructVersion = 3;
       stDeviceConfiguration.ucNagle = 0;
       stDeviceConfiguration.ucAlwaysOn = 0;
       stDeviceConfiguration.uiRadioOffTimer = 120;
       stDeviceConfiguration.ucAutoClock = 0;
       stDeviceConfiguration.iGMT = -3;
+      stDeviceConfiguration.ucBaudRate = ESP32BAUDRATE;
+      stDeviceConfiguration.ucAutoUpdateFH = 0;
     }
-    else // just need to update structure
+    else
     {
-      stDeviceConfiguration.ucStructVersion = 2;
-      stDeviceConfiguration.ucAutoClock = 0;
-      stDeviceConfiguration.iGMT = -3;
+      if (stDeviceConfiguration.ucStructVersion < 2)// just need to update structure
+      {
+        stDeviceConfiguration.ucStructVersion = 3;
+        stDeviceConfiguration.ucAutoClock = 0;
+        stDeviceConfiguration.iGMT = -3;
+        stDeviceConfiguration.ucBaudRate = ESP32BAUDRATE;
+        stDeviceConfiguration.ucAutoUpdateFH = 0;
+      }
+      else // just need to update structure
+      {
+        stDeviceConfiguration.ucStructVersion = 3;
+        stDeviceConfiguration.ucBaudRate = ESP32BAUDRATE;
+        stDeviceConfiguration.ucAutoUpdateFH = 0;
+      }
+      saveFileConfig();
     }
-    saveFileConfig();
   }
 
   return bReturn;
@@ -380,10 +397,41 @@ byte checkOpenConnections() {
   return count;
 }
 
+void setUartSpeed(){
+  Serial.flush();
+  switch (stDeviceConfiguration.ucBaudRate) {
+    case BR9600:
+      Serial.begin(9600);
+      break;
+    case BR19200:
+      Serial.begin(19200);
+      break;
+    case BR57600:
+      Serial.begin(57600);
+      break;
+    case BR115200:
+      Serial.begin(115200);
+      break;
+    case BR230400:
+      Serial.begin(230400);
+      break;
+    case BR460800:
+      Serial.begin(460800);
+      break;
+    case BR921600:
+      Serial.begin(921600);
+      break;
+    case BR859372:
+      Serial.begin(859372);
+      break;
+  }
+}
+
 void setup() {
   WiFi.persistent(true);
   EEPROM.begin(32);
-  Serial.begin(ESP32BAUDRATE);
+  validateConfigFile();
+  setUartSpeed();
   Serial.setRxBufferSize(2148);
   Serial.setTimeout(1);
   Serial.print("TCP-IP UNAPI ESP32 v");
@@ -391,7 +439,6 @@ void setup() {
   Serial.print(" ");
   Serial.println(FIRMWARETYPE);
   Serial.println("(c) 2019-2026 Oduvaldo Pavan Junior - ducasp@gmail.com");
-  validateConfigFile();
   longReadyTimeOut = 0;
   btReadyRetries = 3;
   btReceivedCommand = false;
@@ -470,6 +517,19 @@ void RadioUpdateStatus () {
     WiFi.mode(WIFI_OFF);
 }
 
+void CertificatesHash(size_t certsSize, unsigned char * certBuff) {
+  mbedtls_md_context_t ctx;
+  mbedtls_md_type_t md_type = MBEDTLS_MD_SHA256;
+
+  mbedtls_md_init(&ctx);
+  mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(md_type), 0);
+  mbedtls_md_starts(&ctx);
+  mbedtls_md_update(&ctx, (const unsigned char *) certBuff, certsSize);
+  mbedtls_md_finish(&ctx, shaResult);
+  mbedtls_md_free(&ctx);
+  bShaOk = true;
+}
+
 bool CacheCertificates() {
   if (g_caPem != NULL)
     free(g_caPem);
@@ -490,6 +550,7 @@ bool CacheCertificates() {
         char *buf = (char*)malloc(size + 1);
         if (buf != NULL) {
           size_t rd = caFile.readBytes(buf, size);
+          CertificatesHash(rd, (unsigned char*)buf);
           buf[rd] = 0;
           caFile.close();
           g_caPem = buf;
@@ -508,6 +569,7 @@ bool CacheCertificates() {
       uint8_t *buf = (uint8_t*)malloc(size);
       if (buf != NULL) {
         size_t rd = bundle.read(buf, size);
+        CertificatesHash(rd, (unsigned char*)buf);
         bundle.close();
         if (rd == size) {
           g_caBundle = buf;
@@ -1216,6 +1278,7 @@ void received_data_parser () {
           case CUSTOM_F_WIFI_ON_TIMER_SET:
           case CUSTOM_F_SET_AUTOCLOCK:
           case CUSTOM_F_FILE_BOARD:
+          case CUSTOM_F_SETBAUD:
             btState = RX_PARSER_WAIT_DATA_SIZE;
             btCmdInternalStep = 0;
             break;
@@ -1266,6 +1329,16 @@ void received_data_parser () {
 proccesscmd:
       switch(btCommand)
       {
+        case CUSTOM_F_SETBAUD:
+          if ((uiCmdDataLen !=1)||(btCommandData[0] > BR859372))
+            SendQuickResponse(btCommand,UNAPI_ERR_INV_PARAM);
+          else {
+            stDeviceConfiguration.ucBaudRate = btCommandData[0];
+            saveFileConfig();
+            SendQuickResponse(btCommand, UNAPI_ERR_OK);
+            setUartSpeed();
+          }
+        break;
         case CUSTOM_F_FILE_BOARD:
           if (strcmp(FIRMWARETYPE,(const char*)btCommandData) == 0) {
             bRS232UpdateAllowed = true;
@@ -1472,27 +1545,16 @@ proccesscmd:
             if (bOkParam)
             {
               if (iAPItemI<uiCmdDataLen) //still more data?
-              {
-                //Yes
-                iPWDCount=0;
-                do
-                {
-                    ucOTAFile[iPWDCount]=btCommandData[iAPItemI];
-                    iAPItemI++;
-                    iPWDCount++;
-                }
-                while ((iAPItemI<uiCmdDataLen)&&(iPWDCount<255));
-                ucOTAFile[iPWDCount]=0;
-              }
-              else
                 bOkParam = false;
 
               if (bOkParam)
               {
                 yield();
                 stOTAServer = (const char*)ucOTAServer;
-                stOTAFile = (const char*)ucOTAFile;
                 if (btCommand == CUSTOM_F_UPDATE_FW) {
+                  char chOTAFWHelper[300];
+                  sprintf(chOTAFWHelper, "/index.php?type=%s&version=%s", FIRMWARETYPE, chVer);
+                  stOTAFile = chOTAFWHelper;
                   httpUpdate.rebootOnUpdate(false);                
                   OTAret = httpUpdate.update(OTAclient, stOTAServer, uiOTAPort, stOTAFile, chVer);
                   if (OTAret==HTTP_UPDATE_OK)
@@ -1503,6 +1565,12 @@ proccesscmd:
                     SendQuickResponse(btCommand,UNAPI_ERR_NO_DATA);
                 } else {
                   // lets simply download the cert file
+                  stOTAFile="/index.php?type=CERTS&hash=";
+                  char shaBuff[3];
+                  for (int iHashByte = 0; iHashByte < 32; ++iHashByte) {
+                    sprintf(shaBuff,"%02X",shaResult[iHashByte]);
+                    stOTAFile += shaBuff;
+                  }
                   http.begin(OTAclient, stOTAServer, uiOTAPort, stOTAFile, chVer);
                   int httpCode = http.GET();
                   if (httpCode == HTTP_CODE_OK) {

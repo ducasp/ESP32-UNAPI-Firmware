@@ -443,7 +443,7 @@ This command is used to read the firmware type that is flashed on the device. **
 
 | Position | Function   | Value                                                                                                                                                                                             |
 |:--------:| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0        | CMD_BYTE   | 'B'                                                                                                                                                                                               |
+| 0        | CMD_BYTE   | 'b'                                                                                                                                                                                               |
 | 1        | Error Code    | 0 - Ok                                                                                                                          |
 | 2 - 3    | Response Size | 16 bits value (MSB LSB) indicating the size of the response                                                                     |
 | 4 - X    | Firmware Type | Firmware Type flashed in the device, a NULL (0) terminated string                                                                |
@@ -477,7 +477,7 @@ The firmware type parameters, as follow:
 
 #### <a name="clocalfwupdt"></a> Start Local Firmware Update
 
-This command will request the firmware to start the procedures for local firmware update, whose firmware file will be transmitted through commands. This command will evaluate if the firmware file appears correct and allow the procedure to start or not. Note: the firmware file firmware type MUST BE SENT before using the command "Set File Firmware Type", otherwise starting the update will fail for security reasons (to avoid legacy ESP8266 only software trying to upload ESP8266 firmware)
+This command will request the firmware to start the procedures for local firmware update, whose firmware file will be transmitted through commands. This command will evaluate if the firmware file appears correct and allow the procedure to start or not. **Note:** the firmware file firmware type **MUST BE SENT** before using the command "Set File Firmware Type", otherwise starting the update will fail for security reasons (to avoid legacy ESP8266 only software trying to upload ESP8266 firmware)
 
 *Input Parameters:* 
 

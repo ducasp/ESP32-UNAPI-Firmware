@@ -129,6 +129,7 @@ uint8_t buffer[1024];
 static bool bRS232UpdateAllowed = false;
 static byte shaResult[32];
 static bool bShaOk = false;
+static bool bHTTPTransfer = false;
 
 // ======================== Helper Functions ========================
 void WaitConnectionIfNeeded(bool bFastReturn);
@@ -243,6 +244,7 @@ static void http_close(void) {
 
 static uint8_t http_close(uint8_t err) {
   http_close();
+  http_connected = false;
   return err;
 }
 
@@ -394,6 +396,9 @@ byte checkOpenConnections() {
   byte count = 0;
   for (int i = 0; i < 4; i++)
     if (btConnections[i] != CONN_CLOSED) count++;
+  // So radio is not disabled during OTA transfer or file hunter http transfer
+  if ((count == 0) && ((bHTTPTransfer)||(http_connected)))
+    count = 1;
   return count;
 }
 
@@ -1232,9 +1237,8 @@ void received_data_parser () {
             Serial.end();
             break;
           case CUSTOM_F_CLEAR_AP:
-            WiFi.disconnect();
+            WiFi.disconnect(false, true);
             yield();
-            WiFi.begin("XXXXXXXXXX","YYYYYYYYZZZZZZ");
             SendQuickResponse(btCommand,UNAPI_ERR_OK);
             break;
           case CUSTOM_F_NO_DELAY:
@@ -1555,8 +1559,10 @@ proccesscmd:
                   char chOTAFWHelper[300];
                   sprintf(chOTAFWHelper, "/index.php?type=%s&version=%s", FIRMWARETYPE, chVer);
                   stOTAFile = chOTAFWHelper;
-                  httpUpdate.rebootOnUpdate(false);                
+                  httpUpdate.rebootOnUpdate(false);
+                  bHTTPTransfer = true;                
                   OTAret = httpUpdate.update(OTAclient, stOTAServer, uiOTAPort, stOTAFile, chVer);
+                  bHTTPTransfer = false;
                   if (OTAret==HTTP_UPDATE_OK)
                     SendQuickResponse(btCommand,0);
                   else if (OTAret==HTTP_UPDATE_NO_UPDATES)
@@ -1571,6 +1577,7 @@ proccesscmd:
                     sprintf(shaBuff,"%02X",shaResult[iHashByte]);
                     stOTAFile += shaBuff;
                   }
+                  bHTTPTransfer = true;
                   http.begin(OTAclient, stOTAServer, uiOTAPort, stOTAFile, chVer);
                   int httpCode = http.GET();
                   if (httpCode == HTTP_CODE_OK) {
@@ -1624,6 +1631,7 @@ proccesscmd:
                     else
                       SendQuickResponse(btCommand, UNAPI_ERR_NO_DATA);
                   }
+                  bHTTPTransfer = false;
                 }
               }
             }

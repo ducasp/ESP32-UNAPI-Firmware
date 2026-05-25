@@ -578,11 +578,11 @@ There is no SSH connection open with the specified number.
   - An invalid value was specified for the operation (C).
   - Zero was specified for rows or columns.
 
-### 4.4. SFTP protocol related routines
+### 4.4. SSH SFTP specific routines
 
 To be defined in a future revision
 
-### 4.5. SCP protocol related routines
+### 4.5. SSH SCP specific routines
 
 To be defined in a future revision
 

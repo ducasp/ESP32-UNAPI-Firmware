@@ -71,14 +71,10 @@ enum SupportedBaudRates {
 #endif
 
 //Uncomment ONLY the Flash Size you are targetting
-//#define FLASH_4M
 //#define FLASH_8M
 #define FLASH_16M
 
 #ifdef ESP32_S3
-  #ifdef FLASH_4M
-    #define FIRMWARETYPE "UN32S304"
-  #endif
   #ifdef FLASH_8M
     #define FIRMWARETYPE "UN32S308"
   #endif
@@ -88,9 +84,6 @@ enum SupportedBaudRates {
 #endif
 
 #ifdef ESP32_C6
-  #ifdef FLASH_4M
-    #define FIRMWARETYPE "UN32C604"
-  #endif
   #ifdef FLASH_8M
     #define FIRMWARETYPE "UN32C608"
   #endif
@@ -100,9 +93,6 @@ enum SupportedBaudRates {
 #endif
 
 #ifdef ESP32_WROOM
-  #ifdef FLASH_4M
-    #define FIRMWARETYPE "UN32WR04"
-  #endif
   #ifdef FLASH_8M
     #define FIRMWARETYPE "UN32WR08"
   #endif
@@ -120,7 +110,7 @@ enum SupportedBaudRates {
 //   WIFI_LED_RGB   set to 1 if the onboard LED is a WS2812
 //   WIFI_LED_ON    HIGH/LOW
 // If you do not want to have LED support, comment the line below
-#define USE_WIFI_LED
+//#define USE_WIFI_LED
 #ifndef WIFI_LED_PIN
   #ifdef ESP32_S3
     #define WIFI_LED_PIN  48      // ESP32-S3-Dev: WS2812 on GPIO 48

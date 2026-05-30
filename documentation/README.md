@@ -8,7 +8,7 @@ Copyright (c) 2019 - 2026 Oduvaldo Pavan Junior ( ducasp@ gmail.com ) All rights
 
 1. [Introduction / Design Choices - Goals](#goals)
    1. [Introduction](#intro)
-   2. [Design Choices - Goals](#dcgoals)    
+   2. [Design Choices - Goals](#dcgoals)
 2. [Protocol](#protocol)
 3. [Configurations / Behavior Modifiers](#config)
 4. [Commands](#commands)
@@ -24,27 +24,24 @@ Copyright (c) 2019 - 2026 Oduvaldo Pavan Junior ( ducasp@ gmail.com ) All rights
       9. [Get Access Point Status](#cgetapsts)
       10. [Update Firmware Over the Air](#cotafwupdt)
       11. [Update Certificates Over the Air](#cotacertupdt)
-      12. [Get the firmware type](#cgetfwtype)
-      13. [Set the firmware type indicated by Firmware Update File](#csetfilefwtype)
-      14. [Start Local Firmware Update](#clocalfwupdt)
-      15. [Start Local Certificate Update](#clocalcertupdt)
-      16. [Write Block](#clocalwriteblock)
-      17. [Finish Local Update](#clocalfinish)
-      18. [Initialize Certificates](#cinitcerts)
-      19. [Disable Nagle Algorithm](#cnagledis)
-      20. [Enable Nagle Algorithm](#cnagleen)
-      21. [Set Radio Off Time-Out](#cradiotimeout)
-      22. [Disable Radio](#cradiodisable)
-      23. [Get Settings](#cgetset)
-      24. [Set Baud Rate](#csetbaudrate)
-      25. [Get Auto Clock Settings](#cgetaclkset)
-      26. [Set Auto Clock Settings](#csetaclkset)
-      27. [Get Date and Time](#cgetdate)
-      28. [Hold Connection](#choldconn)
-      29. [Release Connection](#creleaseconn)
-      30. [Turn Wi-Fi Off](#cturnwifioff)
-      31. [Turn RS232 Off](#cturnrs232off)
-      32. [Clear AP from memory](#cclearap)
+      12. [Start Local Firmware Update](#clocalfwupdt)
+      13. [Start Local Certificate Update](#clocalcertupdt)
+      14. [Write Block](#clocalwriteblock)
+      15. [Finish Local Update](#clocalfinish)
+      16. [Initialize Certificates](#cinitcerts)
+      17. [Disable Nagle Algorithm](#cnagledis)
+      18. [Enable Nagle Algorithm](#cnagleen)
+      19. [Set Radio Off Time-Out](#cradiotimeout)
+      20. [Disable Radio](#cradiodisable)
+      21. [Get Settings](#cgetset)
+      22. [Get Auto Clock Settings](#cgetaclkset)
+      23. [Set Auto Clock Settings](#csetaclkset)
+      24. [Get Date and Time](#cgetdate)
+      25. [Hold Connection](#choldconn)
+      26. [Release Connection](#creleaseconn)
+      27. [Turn Wi-Fi Off](#cturnwifioff)
+      28. [Turn RS232 Off](#cturnrs232off)
+      29. [Clear AP from memory](#cclearap)
    2. [UNAPI Commands](#ucommands)
       1. [TCPIP_GET_CAPAB](#cugetcapab)
       2. [TCPIP_GET_IPINFO](#cugetipinfo)
@@ -75,13 +72,23 @@ Copyright (c) 2019 - 2026 Oduvaldo Pavan Junior ( ducasp@ gmail.com ) All rights
       27. [TCPIP_CONFIG_IP](#cucfgip)
       28. [TCPIP_CONFIG_TTL](#cucfgttl)
       29. [TCPIP_CONFIG_PING](#cucfgping)
-      30. [TCPIP_WAIT](#cuwait)
+       30. [TCPIP_WAIT](#cuwait)
+    3. [SSH Commands](#usshcommands)
+      1. [SSH_GET_CAPAB](#cusshgetcapab)
+      2. [SSH_OPEN](#cusshopen)
+      3. [SSH_CLOSE](#cusshclose)
+      4. [SSH_STATE](#cusshstate)
+      5. [SSH_SEND](#cusshsend)
+      6. [SSH_RCV](#cusshrcv)
+      7. [SSH_TERM_TYPE](#cusshtermtype)
+      8. [SSH_WIN_SIZE](#cusshwinsize)
+
 
 ## <a name="goals"></a> Introduction / Design Choices - Goals
 
 ### <a name="intro"></a> Introduction
 
-ESP32 ia a quite affordable way to connect to Wi-Fi. This project originated on ESP8266 ESP-01 modules and now has been ported to ESP32. Usually they have quite a few GPIO pins that can be used in many different interfaces, but the most common ESP-01 module do not expose a lot of those pins. That ESP-01 module is what provides network capabilities to the SM-X MSX system designed by Victor Trucco ([Get in touch with the new SM-X | MSX Resource Center](https://www.msx.org/news/hardware/en/get-in-touch-with-the-new-smx)). Victor designed the hardware of SM-X and I was one of a few fortunate fellows that were able to get an early prototype version of it. As he has plenty of projects on his table, and still was pretty much busy debugging possible hardware / interface issues with SM-X, he did not have time to create an interface to use the ESP8266 / ESP-01 module. For some reason, after helping him to understand an issue with the prototype firmware where I/O only interfaces were not working fine, I just had the idea of getting the Network interface working. 
+ESP8266 and modules using it, like ESP-01, are a quite affordable way to connect to Wi-Fi. Usually they have quite a few GPIO pins that can be used in many different interfaces, but the most common ESP-01 module do not expose a lot of those pins. That ESP-01 module is what provides network capabilities to the SM-X MSX system designed by Victor Trucco ([Get in touch with the new SM-X | MSX Resource Center](https://www.msx.org/news/hardware/en/get-in-touch-with-the-new-smx)). Victor designed the hardware of SM-X and I was one of a few fortunate fellows that were able to get an early prototype version of it. As he has plenty of projects on his table, and still was pretty much busy debugging possible hardware / interface issues with SM-X, he did not have time to create an interface to use the ESP8266 / ESP-01 module. For some reason, after helping him to understand an issue with the prototype firmware where I/O only interfaces were not working fine, I just had the idea of getting the Network interface working. 
 
 As a concept, Victor told me about Luis Fernando Luca Zanoto Wi-Fi cartridge that also used an ESP-01 ([wifi card | MSX Resource Center ](https://www.msx.org/forum/msx-talk/hardware/wifi-card?page=1)) module, and I've first designed the VHDL module that would bridge the ESP8266 serial TX/RX lines to the MSX, it would be kind of similar to the way that Wi-Fi cartridge worked, but I've made a few changes to it as I've progressed through the development. If you are curious, that VHDL interface code can be found at [src/SM-X · master · Victor Trucco / SM-X · GitLab](https://gitlab.com/victor.trucco/sm-x/-/tree/master/src/SM-X), wifi.vhd describes the "cartridge" that will connect to the MSX bus and react to I/O commands, it also uses a UART and a FIFO, customized for this usage ( UART.vhd and fifo.vhd ), those were provided to me by Victor and I've changed the original fifo.vhd to work like a real fifo (it's original behavior was a little strange, it was not really a circular buffer).
 
@@ -95,9 +102,7 @@ So, that was a turning point... One of many... Just to enumerate a few:
 
 3. And then I've just done a quite stable solution with a custom ESP8266 firmware, and Nestor Soriano (Konamiman) extended the UNAPI specification to allow for TLS/SSL (https uses it). You can guess that it is impossible to do TLS/SSL on a puny 8 bit processor running at 3.58MHz, but ESP8266 has a powerful cpu core that can handle that with ease (just limited to a single connection due to RAM constraints). At first, working a little with BearSSL I thought that it would be troublesome to have it working, but could get it working fine and even added https capability to Konamiman HGET utility, which he merged back into his original version!
 
-4. And then it came to have a ROM version of the driver... Making a RAM version was a lot easier, it is sitting on a 16KB segment of RAM memory that is owned by the driver alone, so I can use RAM to make a lot of stuff... When your driver is running in a ROM, it will boot automatically and you can do cool stuff like setting the MSX clock automatically on boot and not needing to load anything using MSX-DOS. But you are left with 16 bytes of RAM memory that is allocated for your slot (as long as it is not expanded or if it is, the other slots do not have devices using their 4 bytes of RAM) which surely was not enough... But hey, that is not firmware related...
-
-5. Well, ESP8266 is kind of old, and moved it to ESP32. Leonardo Manes helped through some of the porting helping with TSL support.
+4. And then it came to have a ROM version of the driver... Making a RAM version was a lot easier, it is sitting on a 16KB segment of RAM memory that is owned by the driver alone, so I can use RAM to make a lot of stuff... When your driver is running in a ROM, it will boot automatically and you can do cool stuff like setting the MSX clock automatically on boot and not needing to load anything using MSX-DOS. But you are left with 16 bytes of RAM memory that is allocated for your slot (as long as it is not expanded or if it is, the other slots do not have devices using their 4 bytes of RAM) which surely was not enough... But hey, that is not firmware related... 
 
 So, this is basically the story behind this development. And now this has been ported over to ESP32, as those modules are easier to source and allow you to have extra features in the future.
 I would like to express my gratitude towards really nice people that helped make this true:
@@ -105,8 +110,6 @@ I would like to express my gratitude towards really nice people that helped make
 - First, Victor Trucco, who helped me whenever I had questions about VHDL, as well gave me a great insight on how to proceed quite a few times, and also for finally trusting in what I've done to use as the official solution for all SM-X devices he produced!
 
 - Now, Nestor Soriano (Konamiman), this guy is really, really busy and did a lot of relevant stuff for the MSX scene... Not only the UNAPI specification and quite a few of the implementations for it, but also NEXTOR that is the evolution of MSX-DOS among many other relevant stuff. You could imagine that someone that has a vast knowledge would not like to help answering basic questions (as I've never done anything either Network related or that used MSX low level stuff), but he was always really kind and helped me whenever I had a question about UNAPI or Network stuff.
-  
-- Leo Manes, he has been of great help getting firmware updates and TLS working on ESP32
 
 - Last, but not least (so, list is in order of when each one jumped in to assist) KdL, that is best know for the great OCM / Zemmix Neo firmware that expanded those machines to an extent the original project never dreamt of... There is no good adjective to his attention to detail and testing capabilities... His input (some times reporting problems, suggesting features, other times helping with code as well) is really valuable and without him, it wouldn't be nearly as good as it is today (i.e.: automatic clock setting was something he suggested me quite a few times, he has helped with some parts of the UNAPI rom Driver as well)
 
@@ -163,7 +166,8 @@ This firmware uses ESP32 Arduino IDE EEPROM functionality, that uses part of the
 | 11-14              | Radio Off Timer: 32 bits unsigned integer containing the time in seconds that need to elapse with the device idle and without open connections before turning off the Wi-Fi radio automatically. Only taken into consideration if Always On is set to 0.                                                                                                                                                                                                                                   | 120                              |
 | 15                 | Auto Clock: this is a byte that the ROM version of the driver uses to determine a few of its behavior. Current possible values are: (0) Normal Operation but do not set clock automatically, (1) Will wait up to 10s for SNTP server response during computer boot and if a response is received will to update the system time and date with SNTP information, (2) Same as 1 but will turn off the Wi-Fi radio as soon as clock is set and (3) Will disable Wi-Fi radio and UNAPI Driver. | 0                                |
 | 16-19              | GMT Setting: 32 bits integer that allows to add a GMT offset from -12 to +12 hours to the time and date response from the SNTP server. Only full hour adjustment is supported.                                                                                                                                                                                                                                                                                                             | -3 (Brazil - Brasilia time zone) |
-| 20-31              | Unused                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | ?                                |
+| 20                 | File Hunter Auto Update: this sets whether firmware and certificates can be automatically updated without user interference. Reserved for future used                                                                                                                                                                                                                                                                                                                                      | 0                                |
+| 21-31              | Unused                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | ?                                |
 
 **Note:** IP Configuration (whether it is set to use DHCP or manual IP assignment) and DNS configuration (whether it is automatic from DHCP or force a different DNS server to be used) are saved within ESPRESSIF nonos SDK automatically, not needing to be saved in the configuration structure.
 
@@ -244,7 +248,7 @@ This command will return the firmware version.
 |:--------:| ------------- | ----- |
 | 0        | CMD_BYTE      | 'V'   |
 | 1        | Version Major | 1     |
-| 2        | Version Minor | 2     |
+| 2        | Version Minor | 3     |
 
 #### <a name="cretry"></a> Retry Transmission
 
@@ -371,7 +375,7 @@ This command will retrieve the current connection status and the Access Point na
 
 #### <a name="cotafwupdt"></a> Update Firmware Over the Air
 
-This command will connect to a given server (local or remote) to retrieve the firmware file and update it Over the Air. **NOTE:** this command may take considerable time to send the response depending upon connection speed and network traffic! A Reset command should be issued after a succesful update, and that reset will also take considerable time while it flashes the new firmware to the memory. I recommend no less than 20 seconds time-out for the command response and no less than 50 seconds time-out for the module to respond to commands after the Reset command. This command expects a server that will receive firmware type and version and return HTTP_OK only if it has a file for that firmware type that has a different version. Details available on the PDF document about ESP Update.
+This command will connect to a given server (local or remote) to retrieve the firmware file and update it Over the Air. **NOTE:** this command may take considerable time to send the response depending upon connection speed and network traffic! A Reset command should be issued after a succesful update, and that reset will also take considerable time while it flashes the new firmware to the memory. I recommend no less than 20 seconds time-out for the command response and no less than 50 seconds time-out for the module to respond to commands after the Reset command.
 
 *Input Parameters:* 
 
@@ -381,7 +385,8 @@ The OTA connection parameters, as follow:
 |:--------:| ------------------ | ------------------------------------------------------------------------------------------------ |
 | 0 - 1    | Port               | Port to be used to connect to the OTA server, LSB in position 0 and MSB in position 1            |
 | 2 - X    | Server IP or URL   | Up to 255 bytes long names are accepted (IP addresses won't reach that limit) for DNS resolution |
-| X+1      | Terminator         | 0 - Null character, indicating the end of Server IP / URL                                        |
+| X+1      | Separator          | 0 - Null character, indicating the end of Server IP / URL                                        |
+| X+2 - Y  | File Path and Name | Path and name of the file to get from the OTA server for this firmware update                    |
 
 *Command Structure:*
 
@@ -396,11 +401,11 @@ The OTA connection parameters, as follow:
 | Position | Function   | Value                                                                                                                                                                                                                                                                                          |
 |:--------:| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0        | CMD_BYTE   | 'U'                                                                                                                                                                                                                                                                                            |
-| 1        | Error Code | 0 - Ok, file was saved and update will occur on next reset<br/>2 - Could not connect to the AP<br/>3 - Could not retrieve the file using the given input parameters<br/>4 - Invalid parameters: too large URL/IP or no terminator on the URL/IP, not enough input data, missing File Path/Name<br/>15 - Up to date: remote server has the capability of evaluating firmware version and found there is no updated version for you |
+| 1        | Error Code | 0 - Ok, file was saved and update will occur on next reset<br/>2 - Could not connect to the AP<br/>3 - Could not retrieve the file using the given input parameters<br/>4 - Invalid parameters: too large URL/IP or no terminator on the URL/IP, not enough input data, missing File Path/Name |
 
 #### <a name="cotacertupdt"></a> Update Certificates Over the Air
 
-This command will connect to a given server (local or remote) to retrieve the certificates file and update it Over the Air. **NOTE:** this command may take considerable time to send the response depending upon connection speed and network traffic! A Reset command should be issued after a succesful update, and that reset will also take considerable time while it flashes the new file system with the new certificates to the memory. I recommend no less than 20 seconds time-out for the command response and no less than 50 seconds time-out for the module to respond to commands after the Reset command. Also, notice that if Initialize Certificates command is not sent after the module finish flashing the data, this initialization procedure will be done during the first SSL connection attempt, which most likely will cause that connection to time-out or take really long time to connect, I strongly recommend using the Initialize Certificates command after a succesful certificate update/module is responding to commands after the reset. This command expects a server that will receive the sha-256 hash of the certificate bundle and return HTTP_OK only if it has a certificate bundle that has a different hash. Details available on the PDF document about ESP Update.
+This command will connect to a given server (local or remote) to retrieve the certificates file and update it Over the Air. **NOTE:** this command may take considerable time to send the response depending upon connection speed and network traffic! A Reset command should be issued after a succesful update, and that reset will also take considerable time while it flashes the new file system with the new certificates to the memory. I recommend no less than 20 seconds time-out for the command response and no less than 50 seconds time-out for the module to respond to commands after the Reset command. Also, notice that if Initialize Certificates command is not sent after the module finish flashing the data, this initialization procedure will be done during the first SSL connection attempt, which most likely will cause that connection to time-out or take really long time to connect, I strongly recommend using the Initialize Certificates command after a succesful certificate update/module is responding to commands after the reset.
 
 *Input Parameters:* 
 
@@ -410,7 +415,8 @@ The OTA connection parameters, as follow:
 |:--------:| ------------------ | ------------------------------------------------------------------------------------------------ |
 | 0 - 1    | Port               | Port to be used to connect to the OTA server, LSB in position 0 and MSB in position 1            |
 | 2 - X    | Server IP or URL   | Up to 255 bytes long names are accepted (IP addresses won't reach that limit) for DNS resolution |
-| X+1      | Terminator         | 0 - Null character, indicating the end of Server IP / URL                                        |
+| X+1      | Separator          | 0 - Null character, indicating the end of Server IP / URL                                        |
+| X+2 - Y  | File Path and Name | Path and name of the file to get from the OTA server for this certificate update                 |
 
 *Command Structure:*
 
@@ -425,59 +431,11 @@ The OTA connection parameters, as follow:
 | Position | Function   | Value                                                                                                                                                                                                                                                                                          |
 |:--------:| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0        | CMD_BYTE   | 'U'                                                                                                                                                                                                                                                                                            |
-| 1        | Error Code | 0 - Ok, file was saved and update will occur on next reset<br/>2 - Could not connect to the AP<br/>3 - Could not retrieve the file using the given input parameters<br/>4 - Invalid parameters: too large URL/IP or no terminator on the URL/IP, not enough input data, missing File Path/Name<br/>15 - Up to date: remote server has the capability of evaluating firmware version and found there is no updated version for you |
-
-#### <a name="cgetfwtype"></a> Get the firmware type
-
-This command is used to read the firmware type that is flashed on the device. **DO NOT USE THIS RESPONSE TO UNLOCK FIRMWARE UPDATE OVER SERIAL!** This will defeat the purpose of the validation if the .bin file is meant for the device.
-
-*Input Parameters:* none
-
-*Command Structure:*
-
-| Position | Function          | Value                                                               |
-|:--------:| ----------------- | ------------------------------------------------------------------- |
-| 0        | CMD_BYTE          | 'b'                                                                 |
-
-*Response Structure:*
-
-| Position | Function   | Value                                                                                                                                                                                             |
-|:--------:| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0        | CMD_BYTE   | 'b'                                                                                                                                                                                               |
-| 1        | Error Code    | 0 - Ok                                                                                                                          |
-| 2 - 3    | Response Size | 16 bits value (MSB LSB) indicating the size of the response                                                                     |
-| 4 - X    | Firmware Type | Firmware Type flashed in the device, a NULL (0) terminated string                                                                |
-
-#### <a name="csetfilefwtype"></a> Set the firmware type indicated by Firmware Update File
-
-This command is used to send the firmware type that is written on the .dat file that is sent along with the .bin firmware file. Device will evaluate if it is the correct type and if it is, unlock the command to start update over serial communication. If it is not it will return invalid parameter and update over serial communication will remain locked.
-
-*Input Parameters:* 
-
-The firmware type parameters, as follow:
-
-| Position | Function    | Value                                                                                              |
-|:--------:| ----------- | -------------------------------------------------------------------------------------------------- |
-| 0 - X    | FW Type     | FW Type as indicated on .dat file                                                                  |
-
-*Command Structure:*
-
-| Position | Function          | Value                                                               |
-|:--------:| ----------------- | ------------------------------------------------------------------- |
-| 0        | CMD_BYTE          | 'B'                                                                 |
-| 1-2      | INPUT_PARAMS_SIZE | 16 bits value (MSB LSB) indicating the size of the input parameters |
-| 3-X      | INPUT_PARAMS      | Input parameters                                                    |
-
-*Response Structure:*
-
-| Position | Function   | Value                                                                                                                                                                                             |
-|:--------:| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0        | CMD_BYTE   | 'B'                                                                                                                                                                                               |
-| 1        | Error Code | 0 - Ok, firmware update over serial communication unlocked<br/>4 - Invalid parameters: firmware type incorrect for the device |
+| 1        | Error Code | 0 - Ok, file was saved and update will occur on next reset<br/>2 - Could not connect to the AP<br/>3 - Could not retrieve the file using the given input parameters<br/>4 - Invalid parameters: too large URL/IP or no terminator on the URL/IP, not enough input data, missing File Path/Name |
 
 #### <a name="clocalfwupdt"></a> Start Local Firmware Update
 
-This command will request the firmware to start the procedures for local firmware update, whose firmware file will be transmitted through commands. This command will evaluate if the firmware file appears correct and allow the procedure to start or not. **Note:** the firmware file firmware type **MUST BE SENT** before using the command "Set File Firmware Type", otherwise starting the update will fail for security reasons (to avoid legacy ESP8266 only software trying to upload ESP8266 firmware)
+This command will request the firmware to start the procedures for local firmware update, whose firmware file will be transmitted through commands. This command will evaluate if the firmware file appears correct and allow the procedure to start or not.
 
 *Input Parameters:* 
 
@@ -501,7 +459,7 @@ The firmware file parameters, as follow:
 | Position | Function   | Value                                                                                                                                                                                             |
 |:--------:| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0        | CMD_BYTE   | 'Z'                                                                                                                                                                                               |
-| 1        | Error Code | 0 - Ok, file is accepted and can continue transmission of firmware file using Write Block command<br/>4 - Invalid parameters: file is too large or its header is not valid, not enough input data<br/>15 - Invalid operation: file firmware type was not set, or the firmware file type set is not correct for this device |
+| 1        | Error Code | 0 - Ok, file is accepted and can continue transmission of firmware file using Write Block command<br/>4 - Invalid parameters: file is too large or its header is not valid, not enough input data |
 
 #### <a name="clocalcertupdt"></a> Start Local Certificates Update
 
@@ -723,32 +681,6 @@ This command will retrieve the current Auto Clock setting and the GMT Offset Adj
 | 2 - 3    | Response Size      | 16 bits value (MSB LSB) indicating the size of the response                                                                                                                  |
 | 4        | Auto Clock Setting | 0 - Normal Operation, No Auto Clock<br/>1 - Normal Operation, Try to Auto Set the Clock<br/>2 - Same as 1, but turn off radio after doing it<br/>3 - Disable Radio and UNAPI |
 | 5        | GMT Offset Adjust  | Signed byte indicating GMT Offset in hours                                                                                                                                   |
-#### <a name="csetbaudrate"></a> Set Baud Rate
-
-This command will save the desired Baud Rate in the configuration and after sending the response the device will immediately communicate at that speed. **CAUTION:** this should not be used by end users, only by manufacturers that want to use other baud rates
-
-*Input Parameters:* 
-
-The Baud Rate settings, as follow:
-
-| Position | Function           | Value                                                                                                                                                                        |
-|:--------:| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0        | Baud Rate          | 0 - 9600 bps<br/>1 - 19200 bps<br/>2 - 57600 bps<br/>3 - 115200 bps<br/>4 - 230400 bps<br/>5 - 460800 bps<br/>6 - 921600 bps<br/>7 - 859372 bps |
-
-*Command Structure:*
-
-| Position | Function          | Value                                                               |
-|:--------:| ----------------- | ------------------------------------------------------------------- |
-| 0        | CMD_BYTE          | 'd'                                                                 |
-| 1-2      | INPUT_PARAMS_SIZE | 16 bits value (MSB LSB) indicating the size of the input parameters |
-| 3        | INPUT_PARAMS      | Input parameters                                                    |
-
-*Response Structure:*
-
-| Position | Function   | Value                                                                                               |
-|:--------:| ---------- | --------------------------------------------------------------------------------------------------- |
-| 0        | CMD_BYTE   | 'd'                                                                                                 |
-| 1        | Error Code | 0 - Ok, new settings saved<br/>4 - Invalid parameters: not enough input data or values out of range |
 
 #### <a name="csetaclkset"></a> Set Auto Clock Settings
 
@@ -906,7 +838,7 @@ This command requests that the current AP is forgotten. Wi-Fi connection, if any
 | 0        | CMD_BYTE   | 'a'           |
 | 1        | Error Code | 0 - always Ok |
 
-### <a name="ucommands"></a> UNAPI Commands
+### <a name="ucommands"></a> TCP/IP UNAPI Commands
 
 The intent of this document is not to explain each command functionality. It is only to tell how the input parameters from UNAPI Commands should be ordered and how the output result will be ordered on the command response. For more details on how each UNAPI command work read the [MSX-UNAPI-specification/TCP-IP UNAPI specification](https://github.com/Konamiman/MSX-UNAPI-specification/blob/master/docs/TCP-IP%20UNAPI%20specification.md).
 
@@ -1551,5 +1483,296 @@ Connection parameters:
 #### <a name="cuwait"></a> TCPIP_WAIT
 
 **This command is not implemented**
+
+### <a name="usshcommands"></a> SSH Commands
+
+The following commands implement SSH client functionality. They allow the MSX application to connect to remote SSH servers and exchange data over an encrypted channel.
+Since the firmware is hosting different UNAPIs, the functions sent for the firmware are the SSH UNAPI defined functions with the 8th bit set. Example: SSH_GET_CAPAB is
+0x01 thus the command sent should be 0x81. SSH_OPEN is 0x02, thus the command sent should be 0x82.
+
+#### <a name="cusshgetcapab"></a> SSH_GET_CAPAB
+
+This command will retrieve information about the SSH capabilities and features offered by the device.
+
+*Input Parameters:* 
+
+Information to be retrieved:
+
+| Position | Function                               | Value                                                                                                                                                                                       |
+|:--------:| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0        | Index of information block to retrieve | 1 - Capabilities index block 1 |
+
+*Command Structure:*
+
+| Position | Function          | Value                                                               |
+|:--------:| ----------------- | ------------------------------------------------------------------- |
+| 0        | CMD_BYTE          | 81                                                                  |
+| 1-2      | INPUT_PARAMS_SIZE | 16 bits value (MSB LSB) indicating the size of the input parameters |
+| 3-X      | INPUT_PARAMS      | Input parameters                                                    |
+
+*Response Structure for Index 1:*
+
+| Position | Function                 | Value                                                                           |
+|:--------:| ------------------------ | ------------------------------------------------------------------------------- |
+| 0        | CMD_BYTE                 | 81                                                                              |
+| 1        | Error Code               | 0 - Ok<br/>4 - Invalid parameters: not enough input data or values out of range |
+| 2 - 3    | Response Size            | 16 bits value (MSB LSB) indicating the size of the response                     |
+|          |                          | This part of response only exists if error code is 0                            |
+| 4 - 5    | Capabilities Flags       | 16 bits value (LSB MSB)                                                         |
+| 6        | Max. Connections         | 1 byte value                                                                    |
+| 7        | Free Connections         | 1 byte value                                                                    |
+
+#### <a name="cusshopen"></a> SSH_OPEN
+
+This command will open a new SSH client connection and authenticate to the remote server.
+
+*Input Parameters:*
+
+| Position | Function             | Value                                                       |
+|:--------:| -------------------- | ----------------------------------------------------------- |
+| 0 - 3    | Remote IP Address    | IP Address                                                  |
+| 4 - 5    | Remote Port          | 16 bits value (LSB MSB)                                     |
+| 6        | Subsystem            | 1 byte value (subsystem)                                    |
+| 7        | Flags                | 1 byte value                                                |
+| 8 - X    | Username             | Zero terminated string                                      |
+| X+1 - Y  | Authentication Data  | Zero terminated string (password or private key PEM data)   |
+
+Flags byte:
+- Bit 0: Authentication method (0 = password, 1 = public key)
+- Bits 1-7: Unused, must be zero
+
+*Command Structure:*
+
+| Position | Function          | Value                                                               |
+|:--------:| ----------------- | ------------------------------------------------------------------- |
+| 0        | CMD_BYTE          | 82                                                                  |
+| 1 - 2    | INPUT_PARAMS_SIZE | 16 bits value (MSB LSB) indicating the size of the input parameters |
+| 3 - Z    | INPUT_PARAMS      | Input parameters                                                    |
+
+*Response Structure:*
+
+| Position | Function          | Value                                                                                                                                                                                                                                                                                 |
+|:--------:| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0        | CMD_BYTE          | 82                                                                                                                                                                                                                                                                                    |
+| 1        | Error Code        | 0 - Ok<br/>1 - Not implemented (SSH client not supported)<br/>2 - Not connected to the network<br/>4 - Invalid parameters: not enough input data or invalid values<br/>9 - No free connections available, close one and try again<br/>11 - Connection could not be established or authentication failed<br/>127 - Not enough memory to create a new session<br/>128 - The key used as password is invalid format<br/>129 - The key or password used to authenticate session was not accepted<br/>130 - An error occurred while requesting a shell for PTY |
+| 2 - 3    | Response Size     | 16 bits value (MSB LSB) indicating the size of the response                                                                                                                                                                                                                           |
+|          |                   | This part of response only exists if error code is 0                                                                                                                                                                                                                                  |
+| 4        | Connection Number | 1 byte value                                                                                                                                                                                                                                                                          |
+
+#### <a name="cusshclose"></a> TCPIP_SSH_CLOSE
+
+This command will close an existing SSH connection.
+
+*Input Parameters:*
+
+| Position | Function          | Value        |
+|:--------:| ----------------- | ------------ |
+| 0        | Connection Number | 1 byte value |
+
+*Command Structure:*
+
+| Position | Function          | Value                                                               |
+|:--------:| ----------------- | ------------------------------------------------------------------- |
+| 0        | CMD_BYTE          | 83                                                                  |
+| 1 - 2    | INPUT_PARAMS_SIZE | 16 bits value (MSB LSB) indicating the size of the input parameters |
+| 3 - X    | INPUT_PARAMS      | Input parameters                                                    |
+
+*Response Structure:*
+
+| Position | Function      | Value                                                                                                          |
+|:--------:| ------------- | -------------------------------------------------------------------------------------------------------------- |
+| 0        | CMD_BYTE      | 83                                                                                                             |
+| 1        | Error Code    | 0 - Ok<br/>1 - Not implemented<br/>4 - Invalid parameters: not enough input data<br/>11 - Connection number is not open or is not an SSH connection |
+| 2 - 3    | Response Size | 16 bits value (MSB LSB) indicating the size of the response: always 0x0000                                     |
+
+#### <a name="cusshstate"></a> TCPIP_SSH_STATE
+
+This command will retrieve the state of an existing SSH connection.
+
+*Input Parameters:*
+
+| Position | Function          | Value        |
+|:--------:| ----------------- | ------------ |
+| 0        | Connection Number | 1 byte value |
+
+*Command Structure:*
+
+| Position | Function          | Value                                                               |
+|:--------:| ----------------- | ------------------------------------------------------------------- |
+| 0        | CMD_BYTE          | 84                                                                  |
+| 1 - 2    | INPUT_PARAMS_SIZE | 16 bits value (MSB LSB) indicating the size of the input parameters |
+| 3 - X    | INPUT_PARAMS      | Input parameters                                                    |
+
+*Response Structure:*
+
+| Position | Function                        | Value                                                                                                                      |
+|:--------:| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| 0        | CMD_BYTE                        | 84                                                                                                                         |
+| 1        | Error Code                      | 0 - Ok<br/>1 - Not implemented<br/>4 - Invalid parameters: not enough input data<br/>11 - Connection number is not open or is not an SSH connection |
+| 2 - 3    | Response Size                   | 16 bits value (MSB LSB) indicating the size of the response                                                                |
+|          |                                 | This part of response only exists if error code is 0                                                                       |
+| 4        | Connection state                | 1 byte value (0=Closed, 1=Connecting, 2=Authenticating, 3=Connected, 4=Error)                                              |
+| 5 - 6    | Total available incoming bytes  | 16 bits value (LSB MSB)                                                                                                    |
+
+#### <a name="cusshsend"></a> TCPIP_SSH_SEND
+
+This command will send data (stdin) over an existing SSH connection.
+
+*Input Parameters:*
+
+| Position | Function          | Value               |
+|:--------:| ----------------- | ------------------- |
+| 0        | Connection Number | 1 byte value        |
+| 1 - X    | Data to be sent   | (X) bytes of data   |
+
+*Command Structure:*
+
+| Position | Function          | Value                                                               |
+|:--------:| ----------------- | ------------------------------------------------------------------- |
+| 0        | CMD_BYTE          | 85                                                                  |
+| 1 - 2    | INPUT_PARAMS_SIZE | 16 bits value (MSB LSB) indicating the size of the input parameters |
+| 3 - Z    | INPUT_PARAMS      | Input parameters                                                    |
+
+*Response Structure:*
+
+| Position | Function      | Value                                                                                                                                                                    |
+|:--------:| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 0        | CMD_BYTE      | 85                                                                                                                                                                       |
+| 1        | Error Code    | 0 - Ok<br/>1 - Not implemented<br/>4 - Invalid parameters: not enough input data<br/>11 - Connection number is not open or is not an SSH connection<br/>12 - Invalid connection state (not Connected)<br/>13 - Insufficient buffer space |
+| 2 - 3    | Response Size | 16 bits value (MSB LSB) indicating the size of the response: always 0x0000                                                                                               |
+
+#### <a name="cusshrcv"></a> TCPIP_SSH_RCV
+
+This command will retrieve data (stdout/stderr) received from an existing SSH connection.
+
+*Input Parameters:*
+
+| Position | Function                      | Value                   |
+|:--------:| ----------------------------- | ----------------------- |
+| 0        | Connection Number             | 1 byte value            |
+| 1 - 2    | Maximum data size to retrieve | 16 bits value (LSB MSB) |
+
+*Command Structure:*
+
+| Position | Function          | Value                                                               |
+|:--------:| ----------------- | ------------------------------------------------------------------- |
+| 0        | CMD_BYTE          | 86                                                                  |
+| 1 - 2    | INPUT_PARAMS_SIZE | 16 bits value (MSB LSB) indicating the size of the input parameters |
+| 3 - X    | INPUT_PARAMS      | Input parameters                                                    |
+
+*Response Structure:*
+
+| Position | Function      | Value                                                                                                                                                                          |
+|:--------:| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 0        | CMD_BYTE      | 86                                                                                                                                                                             |
+| 1        | Error Code    | 0 - Ok<br/>1 - Not implemented<br/>3 - No data available<br/>4 - Invalid parameters: not enough input data<br/>11 - Connection number is not open or is not an SSH connection<br/>12 - Invalid connection state |
+| 2 - 3    | Response Size | 16 bits value (MSB LSB) indicating the size of the response                                                                                                                    |
+|          |               | This part of response only exists if error code and response size are 0                                                                                                        |
+| 4 - X    | Received Data | Data retrieved                                                                                                                                                                 |
+
+#### <a name="cusshtermtype"></a> TCPIP_SSH_TERM_TYPE
+
+This command will retrieve or set the terminal type to be reported to the remote SSH server.
+**NOTE** This setting does not affect currently open sections
+
+*Input Parameters for GET (B = 0):*
+
+| Position | Function          | Value        |
+|:--------:| ----------------- | ------------ |
+| 0        | Connection Number | 1 byte value |
+| 1        | GET               | 0            |
+
+*Input Parameters for SET (B = 1):*
+
+| Position | Function          | Value        |
+|:--------:| ----------------- | ------------ |
+| 0        | Connection Number | 1 byte value |
+| 1        | SET               | 1            |
+| 2        | Terminal Type     | 1 byte value |
+
+Terminal Type values:
+
+| Value | Description |
+|:-----:| ----------- |
+| 0     | VT-52       |
+| 1     | ANSI (16 colors) |
+| 2     | xterm       |
+| 3–255 | Reserved for future terminal types |
+
+Default terminal type (when not explicitly set) is VT-52 (0).
+
+*Command Structure:*
+
+| Position | Function          | Value                                                               |
+|:--------:| ----------------- | ------------------------------------------------------------------- |
+| 0        | CMD_BYTE          | 87                                                                  |
+| 1 - 2    | INPUT_PARAMS_SIZE | 16 bits value (MSB LSB) indicating the size of the input parameters |
+| 3 - X    | INPUT_PARAMS      | Input parameters                                                    |
+
+*Response Structure for GET (error = 0):*
+
+| Position | Function      | Value                                                                                       |
+|:--------:| ------------- | ------------------------------------------------------------------------------------------- |
+| 0        | CMD_BYTE      | 87                                                                                          |
+| 1        | Error Code    | 0 - Ok                                                                                      |
+| 2 - 3    | Response Size | 16 bits value (MSB LSB) indicating the size of the response: always 0x0001                  |
+| 4        | Terminal Type | 1 byte value (0=VT-52, 1=ANSI, 2=xterm, 3-255=reserved)                                     |
+
+*Response Structure for SET or GET with error:*
+
+| Position | Function      | Value                                                                                                                  |
+|:--------:| ------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| 0        | CMD_BYTE      | 87                                                                                                                     |
+| 1        | Error Code    | 0 - Ok (SET)<br/>1 - Not implemented<br/>4 - Invalid parameters: not enough input data or invalid GET/SET or type value<br/>11 - Connection number is not open or is not an SSH connection |
+| 2 - 3    | Response Size | 16 bits value (MSB LSB) indicating the size of the response: always 0x0000                                             |
+
+#### <a name="cusshwinsize"></a> TCPIP_SSH_WIN_SIZE
+
+This command will retrieve or set the terminal window size (rows and columns) to be reported to the remote SSH server.
+**NOTE** This setting does not affect currently open sections
+
+*Input Parameters for GET (B = 0):*
+
+| Position | Function          | Value        |
+|:--------:| ----------------- | ------------ |
+| 0        | Connection Number | 1 byte value |
+| 1        | GET/SET           | 0            |
+
+*Input Parameters for SET (B = 1):*
+
+| Position | Function          | Value        |
+|:--------:| ----------------- | ------------ |
+| 0        | Connection Number | 1 byte value |
+| 1        | GET/SET           | 1            |
+| 2        | Rows              | 1 byte value |
+| 3        | Columns           | 1 byte value |
+
+Default window size (when not explicitly set) is 24 rows × 40 columns.
+
+*Command Structure:*
+
+| Position | Function          | Value                                                               |
+|:--------:| ----------------- | ------------------------------------------------------------------- |
+| 0        | CMD_BYTE          | 88                                                                  |
+| 1 - 2    | INPUT_PARAMS_SIZE | 16 bits value (MSB LSB) indicating the size of the input parameters |
+| 3 - X    | INPUT_PARAMS      | Input parameters                                                    |
+
+*Response Structure for GET (error = 0):*
+
+| Position | Function      | Value                                                                                          |
+|:--------:| ------------- | ---------------------------------------------------------------------------------------------- |
+| 0        | CMD_BYTE      | 88                                                                                             |
+| 1        | Error Code    | 0 - Ok                                                                                         |
+| 2 - 3    | Response Size | 16 bits value (MSB LSB) indicating the size of the response: always 0x0002                     |
+| 4        | Rows          | 1 byte value                                                                                   |
+| 5        | Columns       | 1 byte value                                                                                   |
+
+*Response Structure for SET or GET with error:*
+
+| Position | Function      | Value                                                                                                                  |
+|:--------:| ------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| 0        | CMD_BYTE      | 88                                                                                                                     |
+| 1        | Error Code    | 0 - Ok (SET)<br/>1 - Not implemented<br/>4 - Invalid parameters: not enough input data or invalid GET/SET or rows/cols values<br/>11 - Connection number is not open or is not an SSH connection |
+| 2 - 3    | Response Size | 16 bits value (MSB LSB) indicating the size of the response: always 0x0000                                             |
 
 

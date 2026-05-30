@@ -2,18 +2,11 @@
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/R6R2BRGX6)
 
+A sample TCP IP and SSH UNAPI driver that work along with this firmware
+is available at:
 
-Three sample TCP IP UNAPI drivers that work along with this firmware
-are available at:
-
-(ROM / IO Version)
-https://github.com/ducasp/MSX-Development/tree/master/MSX-SM/WiFi/UNAPI_BIOS_CUSTOM_ESP_FIRMWARE
-
-(ROM / Memory Mapped IO Version)
-https://github.com/ducasp/MSX-Development/tree/master/MSXPICO/UNAPI_BIOS_CUSTOM_ESP_MSXPICO
-
-(RAM Version, requires Memory Mapper and RAMHELPR by Konamiman)
-https://github.com/ducasp/MSX-Development/tree/master/MSX-SM/WiFi/UNAPI_DRIVER_CUSTOM_ESP_FIRMWARE
+(ROM Version)
+https://github.com/ducasp/MSX-Development/tree/master/UNAPI_BIOS_CUSTOM_ESP_V2
 
 This application is an example of how to set configurations, scan and join networks or update firmware or certificates on IO interface:
 https://github.com/ducasp/MSX-Development/tree/master/CFGESP

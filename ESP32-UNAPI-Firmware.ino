@@ -1,7 +1,7 @@
 /*
 ESP32-UNAPI-Firmware.ino
     ESP32 UNAPI Implementation.
-    Revision 1.1
+    Revision 1.0
 
 Requires Arduino IDE and ESP32 libraries
 
@@ -32,25 +32,31 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this file.  If not, see <https://www.gnu.org/licenses/>
 
-v1.0
+v0.1
     - Initial ESP32 support, no HTTPS, no firmware update
 
-v1.1 (Merging with Leo Manes ESP32 Port)
+v0.2 (Merging with Leo Manes ESP32 Port)
     - HTTPS with TLS 1.2 by Leo Manes (WiFiClientSecure / mbedTLS)
     - Changed LittleFS to FFat (APP:I set to 3MB / OTA:above 1.5MB for now)
     - Added missing WiFiClientSecure include
     - Fixed Update.begin() parameters (U_SPIFFS instead of U_FS)
     - Fixed IPAddress comparisons
     - Added online led (blue using the onboard WS2812)
-*/
 
+v0.3
+    - Added SSH client support via libssh-esp32 library
+    - New functions: TCPIP_SSH_OPEN, TCPIP_SSH_CLOSE, TCPIP_SSH_STATE,
+      TCPIP_SSH_SEND, TCPIP_SSH_RCV, TCPIP_SSH_TERM_TYPE, TCPIP_SSH_WIN_SIZE
+    - Secondary capabilities bit 10 set (SSH client)
+*/
 #include "UNAPIESP.h"
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <Update.h>
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>
-
+#include "libssh_esp32.h"
+#include <libssh/libssh.h>
 #include <FFat.h>
 #include <Ticker.h>
 #include <time.h>
@@ -59,6 +65,8 @@ v1.1 (Merging with Leo Manes ESP32 Port)
 #include "mbedtls/md.h"
 
 #define HTTP_PACKET_SIZE 2048
+
+SET_LOOP_TASK_STACK_SIZE(32768); // Set loopTask to 32KB, otherwise SSH functions will crash
 
 WiFiClientSecure *TClient1;
 static char *g_caPem = NULL;
@@ -130,6 +138,13 @@ static bool bRS232UpdateAllowed = false;
 static byte shaResult[32];
 static bool bShaOk = false;
 static bool bHTTPTransfer = false;
+
+// SSH globals
+static ssh_session sshSessions[4] = {NULL, NULL, NULL, NULL};
+static ssh_channel sshChannels[4] = {NULL, NULL, NULL, NULL};
+static uint8_t sshTermType = TERM_VT52;
+static uint8_t sshWinRow = 24;
+static uint8_t sshWinCol = 40;
 
 // ======================== Helper Functions ========================
 void WaitConnectionIfNeeded(bool bFastReturn);
@@ -260,14 +275,14 @@ static inline void ipToBytes(const IPAddress& ip, uint8_t* out) {
 }
 
 unsigned char getConnStatus() {
-    wl_status_t st = WiFi.status();
-    switch (st) {
-        case WL_CONNECTED:      return 5; // STATION_GOT_IP
-        case WL_CONNECT_FAILED: return 4; // STATION_CONNECT_FAIL
-        case WL_NO_SSID_AVAIL:  return 3; // STATION_NO_AP_FOUND
-        case WL_DISCONNECTED:   return 1; // STATION_CONNECTING
-        case WL_IDLE_STATUS:    return 0; // STATION_IDLE
-        default:                return 2; //Probably wrong password, not connected but SSID is available
+  wl_status_t st = WiFi.status();
+  switch (st) {
+      case WL_CONNECTED:      return 5; // STATION_GOT_IP
+      case WL_CONNECT_FAILED: return 4; // STATION_CONNECT_FAIL
+      case WL_NO_SSID_AVAIL:  return 3; // STATION_NO_AP_FOUND
+      case WL_DISCONNECTED:   return 1; // STATION_CONNECTING
+      case WL_IDLE_STATUS:    return 0; // STATION_IDLE
+      default:                return 2; //Probably wrong password, not connected but SSID is available
   }
 }
 
@@ -436,10 +451,10 @@ void setup() {
   WiFi.persistent(true);
   EEPROM.begin(32);
   validateConfigFile();
-  setUartSpeed();
   Serial.setRxBufferSize(2148);
   Serial.setTimeout(1);
-  Serial.print("TCP-IP UNAPI ESP32 v");
+  setUartSpeed();
+  Serial.print("TCP-IP SSH UNAPI ESP32 v");
   Serial.print(chVer);
   Serial.print(" ");
   Serial.println(FIRMWARETYPE);
@@ -493,6 +508,7 @@ void setup() {
   }
   configTime(0,0, "pool.ntp.org");
   CacheCertificates();
+  libssh_begin();
   Serial.println("Ready");
 }
 
@@ -626,7 +642,7 @@ bool IsActivePortInUse (unsigned int uiPort) {
       break;
     }
 
-  return bRet;  
+  return bRet;
 }
 
 WiFiServer *IsPassivePortInUse (unsigned int uiPort) {
@@ -915,6 +931,18 @@ void WarmBoot() {
   byte bti;
   for (bti=0;bti<4;++bti)
   {
+    if (btConnections[bti] == CONN_SSH) {
+      if (sshChannels[bti] != NULL) {
+        ssh_channel_close(sshChannels[bti]);
+        ssh_channel_free(sshChannels[bti]);
+        sshChannels[bti] = NULL;
+      }
+      if (sshSessions[bti] != NULL) {
+        ssh_disconnect(sshSessions[bti]);
+        ssh_free(sshSessions[bti]);
+        sshSessions[bti] = NULL;
+      }
+    }
     CloseTcpConnection(bti);
     CloseUdpConnection(bti);
   }
@@ -924,6 +952,212 @@ void WarmBoot() {
     RadioUpdateStatus();
   }
 }
+
+// ======================== SSH Helper Functions ========================
+
+static byte sshOpen(byte *params, unsigned int paramLen, byte *outConnNum) {
+  if (paramLen < 8) return UNAPI_ERR_INV_PARAM;
+
+  // Parse remote IP
+  IPAddress remoteIP(params[0], params[1], params[2], params[3]);
+  if (remoteIP == IPAddress(0,0,0,0) || remoteIP == IPAddress(127,0,0,1))
+    return UNAPI_ERR_INV_PARAM;
+  if (WiFi.status() != WL_CONNECTED) return UNAPI_ERR_NO_NETWORK;
+
+  // Parse port (LSB first)
+  int port = params[4] | (params[5] << 8);
+
+  // Subsystem: 
+  byte subsystem = params[6];
+  if ((subsystem != SSH_SUB_PTY) && (subsystem != SSH_SUB_RAW))
+    return UNAPI_ERR_NOT_IMP;
+  // Flags: bit 0 = auth method (0=password, 1=public key), bits 1-7 unused
+  byte flags = params[7];
+  if (flags > 1)
+    return UNAPI_ERR_INV_PARAM;
+  bool usePubKey = (flags & 0x01) != 0;
+
+  // Parse username (null-terminated, starts at offset 7)
+  unsigned int userOff = 8;
+  unsigned int userLen = 0;
+  while (userOff + userLen < paramLen && params[userOff + userLen] != 0) userLen++;
+  if (userLen == 0 || userOff + userLen >= paramLen) return UNAPI_ERR_INV_PARAM;
+
+  // Parse auth data (after username null)
+  unsigned int authOff = userOff + userLen + 1;
+  unsigned int authLen = 0;
+  while (authOff + authLen < paramLen && params[authOff + authLen] != 0) authLen++;
+  if (authLen == 0) return UNAPI_ERR_INV_PARAM;
+
+  // Find free slot
+  byte slot;
+  for (slot = 0; slot < 4; slot++)
+    if (btConnections[slot] == CONN_CLOSED) break;
+  if (slot == 4) return UNAPI_ERR_NO_FREE_CONN;
+
+  // Create SSH session
+  ssh_session session = ssh_new();
+  if (session == NULL) return SSH_ERR_NO_RSS;
+
+  // Build host string
+  char hostStr[16];
+  sprintf(hostStr, "%d.%d.%d.%d", params[0], params[1], params[2], params[3]);
+  ssh_options_set(session, SSH_OPTIONS_HOST, hostStr);
+  ssh_options_set(session, SSH_OPTIONS_PORT, &port);
+  ssh_options_set(session, SSH_OPTIONS_USER, (const char*)&params[userOff]);
+
+  // Connect TCP
+  if (ssh_connect(session) != SSH_OK) {
+    ssh_free(session);
+    return UNAPI_ERR_NO_CONN;
+  }
+
+  // Authenticate
+  if (usePubKey) {
+    ssh_key pvtkey = NULL;
+    int rc = ssh_pki_import_privkey_base64(
+      (const char*)&params[authOff], NULL, NULL, NULL, &pvtkey);
+    if (rc != SSH_OK) {
+      ssh_disconnect(session);
+      ssh_free(session);
+      return SSH_ERR_INV_KEY;
+    }
+    rc = ssh_userauth_publickey(session, NULL, pvtkey);
+    ssh_key_free(pvtkey);
+    if (rc != SSH_AUTH_SUCCESS) {
+      ssh_disconnect(session);
+      ssh_free(session);
+      return SSH_ERR_PWD;
+    }
+  } else {
+    if (ssh_userauth_password(session, NULL, (const char*)&params[authOff]) != SSH_AUTH_SUCCESS) {
+      ssh_disconnect(session);
+      ssh_free(session);
+      return SSH_ERR_PWD;
+    }
+  }
+
+  // Open channel
+  ssh_channel channel = ssh_channel_new(session);
+  if (channel == NULL) {
+    ssh_disconnect(session);
+    ssh_free(session);
+    return SSH_ERR_NO_RSS;
+  }
+  if (ssh_channel_open_session(channel) != SSH_OK) {
+    ssh_channel_free(channel);
+    ssh_disconnect(session);
+    ssh_free(session);
+    return UNAPI_ERR_NO_CONN;
+  }
+
+  if (subsystem == SSH_SUB_PTY) {
+    // Request PTY and shell
+    const char *termStr;
+    switch (sshTermType) {
+      case TERM_VT52: termStr = "vt52"; break;
+      case TERM_ANSI: termStr = "ansi"; break;
+      default: termStr = "xterm"; break;
+    }
+    ssh_channel_request_pty_size(channel, termStr, sshWinCol, sshWinRow);
+    if (ssh_channel_request_shell(channel) != SSH_OK) {
+      ssh_channel_close(channel);
+      ssh_channel_free(channel);
+      ssh_disconnect(session);
+      ssh_free(session);
+      return SSH_ERR_PTY_REQ;
+    }
+  }
+
+  // Store
+  sshSessions[slot] = session;
+  sshChannels[slot] = channel;
+  btConnections[slot] = CONN_SSH;
+  *outConnNum = slot + 1;
+  return UNAPI_ERR_OK;
+}
+
+static byte sshClose(byte connNum) {
+  if (connNum < 1 || connNum > 4) return UNAPI_ERR_NO_CONN;
+  byte slot = connNum - 1;
+  if (btConnections[slot] != CONN_SSH) return UNAPI_ERR_NO_CONN;
+
+  if (sshChannels[slot] != NULL) {
+    ssh_channel_close(sshChannels[slot]);
+    ssh_channel_free(sshChannels[slot]);
+    sshChannels[slot] = NULL;
+  }
+  if (sshSessions[slot] != NULL) {
+    ssh_disconnect(sshSessions[slot]);
+    ssh_free(sshSessions[slot]);
+    sshSessions[slot] = NULL;
+  }
+  btConnections[slot] = CONN_CLOSED;
+  return UNAPI_ERR_OK;
+}
+
+static byte sshState(byte connNum, uint8_t *state, uint16_t *avail) {
+  if (connNum < 1 || connNum > 4) return UNAPI_ERR_NO_CONN;
+  byte slot = connNum - 1;
+  if (btConnections[slot] != CONN_SSH || sshSessions[slot] == NULL) {
+    *state = SSH_CLOSED;
+    return UNAPI_ERR_OK;
+  }
+
+  ssh_channel ch = sshChannels[slot];
+  if (ch != NULL && ssh_channel_is_open(ch) && !ssh_channel_is_eof(ch)) {
+    *state = SSH_CONNECTED;
+    *avail = (uint16_t)ssh_channel_poll(ch, 0);
+  } else if (ch != NULL && ssh_channel_is_eof(ch)) {
+    *state = SSH_ERROR;
+    *avail = 0;
+  } else {
+    *state = SSH_CLOSED;
+    *avail = 0;
+  }
+  return UNAPI_ERR_OK;
+}
+
+static byte sshSend(byte connNum, byte *data, unsigned int len) {
+  if (connNum < 1 || connNum > 4) return UNAPI_ERR_NO_CONN;
+  byte slot = connNum - 1;
+  if (btConnections[slot] != CONN_SSH) return UNAPI_ERR_NO_CONN;
+  if (sshChannels[slot] == NULL || !ssh_channel_is_open(sshChannels[slot]))
+    return UNAPI_ERR_CONN_STATE;
+
+  int n = ssh_channel_write(sshChannels[slot], data, len);
+  if (n == SSH_ERROR) return UNAPI_ERR_CONN_STATE;
+  if ((unsigned int)n < len) return UNAPI_ERR_BUFFER;
+  return UNAPI_ERR_OK;
+}
+
+static byte sshReceive(byte connNum, byte *buf, uint16_t maxSize, uint16_t *outLen) {
+  if (connNum < 1 || connNum > 4) return UNAPI_ERR_NO_CONN;
+  byte slot = connNum - 1;
+  if (btConnections[slot] != CONN_SSH) return UNAPI_ERR_NO_CONN;
+  if (sshChannels[slot] == NULL || !ssh_channel_is_open(sshChannels[slot]))
+    return UNAPI_ERR_CONN_STATE;
+
+  int n = ssh_channel_read_nonblocking(sshChannels[slot], buf, maxSize, 0);
+  if (n == SSH_ERROR) return UNAPI_ERR_CONN_STATE;
+  if (n == 0) return UNAPI_ERR_NO_DATA;
+  *outLen = (uint16_t)n;
+  return UNAPI_ERR_OK;
+}
+
+static byte sshSetTermType(byte type) {
+  if (type > TERM_XTERM) return UNAPI_ERR_INV_PARAM;
+  sshTermType = type;
+  return UNAPI_ERR_OK;
+}
+
+static byte sshSetWinSize(byte rows, byte cols) {
+  if (rows == 0 || cols == 0) return UNAPI_ERR_INV_PARAM;
+  sshWinRow = rows;
+  sshWinCol = cols;
+  return UNAPI_ERR_OK;
+}
+
 
 void received_data_parser () {
   static bool bInit = false;
@@ -1283,9 +1517,17 @@ void received_data_parser () {
           case CUSTOM_F_SET_AUTOCLOCK:
           case CUSTOM_F_FILE_BOARD:
           case CUSTOM_F_SETBAUD:
-            btState = RX_PARSER_WAIT_DATA_SIZE;
-            btCmdInternalStep = 0;
-            break;
+          case SSH_GET_CAPAB:
+          case SSH_OPEN:
+          case SSH_CLOSE:
+          case SSH_STATE:
+          case SSH_SEND:
+          case SSH_RCV:
+          case SSH_TERM_TYPE:
+          case SSH_WIN_SIZE:
+             btState = RX_PARSER_WAIT_DATA_SIZE;
+             btCmdInternalStep = 0;
+             break;
           default:
             btState = RX_PARSER_IDLE;
             break;
@@ -1463,7 +1705,7 @@ proccesscmd:
           }
         break;
         case TCPIP_CONFIG_AUTOIP:
-          if ((uiCmdDataLen != 2) || (btCommandData[0]>1) || (btCommandData[1]>3))          
+          if ((uiCmdDataLen != 2) || (btCommandData[0]>1) || (btCommandData[1]>3))
             SendResponse(btCommand,UNAPI_ERR_INV_PARAM,0,0);
           else
           {
@@ -1638,7 +1880,7 @@ proccesscmd:
             if(!bOkParam)
               SendQuickResponse(btCommand,UNAPI_ERR_INV_PARAM);
           }
-          break;
+        break;
         case CUSTOM_F_CONNECT_AP:
         {
           bool bSentRsp = false;
@@ -1712,6 +1954,27 @@ proccesscmd:
               SendQuickResponse(btCommand,UNAPI_ERR_INV_PARAM);
           }
         }
+        break;
+        case SSH_GET_CAPAB:
+          if ((uiCmdDataLen != 1) || (btCommandData[0]==0) || (btCommandData[0]>1))
+            SendResponse(btCommand,UNAPI_ERR_INV_PARAM,0,0);
+          else
+          {
+            Serial.write(btCommand);
+            Serial.write(UNAPI_ERR_OK);
+            Serial.write(0);
+            Serial.write(4);
+            // Capability flags ENABLED:
+            // 0 - PTY
+            // 3 - RAW
+            // 8 - Built-in TCP/IP
+            // 9 - Connection pool shared with built-in TCP/IP
+            // 10 - Support Public Key Authentication
+            Serial.write(B00001001); //flags LSB
+            Serial.write(B00000111); //flags MSB
+            Serial.write(4); //Max 4 simultaneous SSH conns
+            Serial.write(4 - checkOpenConnections()); //Free SSH conns
+          }
         break;
         case TCPIP_GET_CAPAB:
           if ((uiCmdDataLen != 1) || (btCommandData[0]==0) || (btCommandData[0]>4))
@@ -1793,9 +2056,9 @@ proccesscmd:
               //Secondary Capabilities disabled:
               //Bit 3: Manually set the peer IP address
               //Bit 9: Use TLS in TCP passive connections
-              //Bits 10-15: Unused
+              //Bits 11-15: Unused
               Serial.write(B11110111); //flags LSB
-              Serial.write(B00000001); //flags MSB
+              Serial.write(B00000001); //flags MSB (bit 8 + bit 10)
               // Secondary features flags currently not defined, all 0
               Serial.write(0);
               Serial.write(0);
@@ -1804,8 +2067,7 @@ proccesscmd:
               break;
             }
           }
-          break;
-
+        break;
         case TCPIP_GET_IPINFO:
           if ((uiCmdDataLen != 1) || (btCommandData[0]==0) || (btCommandData[0]>6))
             SendResponse(btCommand,UNAPI_ERR_INV_PARAM,0,0);
@@ -2532,6 +2794,133 @@ proccesscmd:
             SendResponse(btCommand, UNAPI_ERR_INV_PARAM, 0, 0);
           }
           break;
+
+        case SSH_OPEN:
+        {
+          byte connNum;
+          byte result = sshOpen(btCommandData, uiCmdDataLen, &connNum);
+          if (result == UNAPI_ERR_OK) {
+            btCommandData[0] = connNum;
+            SendResponse(btCommand, result, 1, btCommandData);
+          } else {
+            SendResponse(btCommand, result, 0, 0);
+          }
+        }
+        break;
+
+        case SSH_CLOSE:
+        {
+          if (uiCmdDataLen < 1) {
+            SendResponse(btCommand, UNAPI_ERR_INV_PARAM, 0, 0);
+          } else if (btCommandData[0] == 0) {
+            // SSH connections are not transient, must be closed individually
+            SendResponse(btCommand, UNAPI_ERR_NO_CONN, 0, 0);
+          } else {
+            byte result = sshClose(btCommandData[0]);
+            SendResponse(btCommand, result, 0, 0);
+          }
+        }
+        break;
+
+        case SSH_STATE:
+        {
+          if (uiCmdDataLen < 1) {
+            SendResponse(btCommand, UNAPI_ERR_INV_PARAM, 0, 0);
+          } else {
+            uint8_t state;
+            uint16_t avail;
+            byte result = sshState(btCommandData[0], &state, &avail);
+            if (result == UNAPI_ERR_OK) {
+              btCommandData[0] = state;
+              btCommandData[1] = (uint8_t)(avail & 0xff);
+              btCommandData[2] = (uint8_t)((avail >> 8) & 0xff);
+              SendResponse(btCommand, result, 3, btCommandData);
+            } else {
+              SendResponse(btCommand, result, 0, 0);
+            }
+          }
+        }
+        break;
+
+        case SSH_SEND:
+        {
+          if (uiCmdDataLen < 1) {
+            SendResponse(btCommand, UNAPI_ERR_INV_PARAM, 0, 0);
+          } else {
+            byte result = sshSend(btCommandData[0], btCommandData + 1, uiCmdDataLen - 1);
+            SendResponse(btCommand, result, 0, 0);
+          }
+        }
+        break;
+
+        case SSH_RCV:
+        {
+          if (uiCmdDataLen < 3) {
+            SendResponse(btCommand, UNAPI_ERR_INV_PARAM, 0, 0);
+          } else {
+            uint16_t maxSize = btCommandData[1] + (btCommandData[2] * 256);
+            if (maxSize > 2048) maxSize = 2048;
+            uint16_t rcvLen;
+            byte result = sshReceive(btCommandData[0], btCommandData, maxSize, &rcvLen);
+            if (result == UNAPI_ERR_OK) {
+              SendResponse(btCommand, result, rcvLen, btCommandData);
+            } else {
+              SendResponse(btCommand, result, 0, 0);
+            }
+          }
+        }
+        break;
+
+        case SSH_TERM_TYPE:
+        {
+          if (uiCmdDataLen < 1) {
+            SendResponse(btCommand, UNAPI_ERR_INV_PARAM, 0, 0);
+          } else {
+            byte getSet = btCommandData[0];
+            if (getSet == 0) {
+              // GET
+              btCommandData[0] = sshTermType;
+              SendResponse(btCommand, UNAPI_ERR_OK, 1, btCommandData);
+            } else if (getSet == 1) {
+              // SET
+              if (uiCmdDataLen < 2) {
+                SendResponse(btCommand, UNAPI_ERR_INV_PARAM, 0, 0);
+              } else {
+                byte result = sshSetTermType(btCommandData[1]);
+                SendResponse(btCommand, result, 0, 0);
+              }
+            } else {
+              SendResponse(btCommand, UNAPI_ERR_INV_PARAM, 0, 0);
+            }
+          }
+        }
+        break;
+
+        case SSH_WIN_SIZE:
+        {
+          if (uiCmdDataLen < 1) {
+            SendResponse(btCommand, UNAPI_ERR_INV_PARAM, 0, 0);
+          } else {
+            byte getSet = btCommandData[0];
+            if (getSet == 0) {
+              // GET
+              btCommandData[0] = sshWinRow;
+              btCommandData[1] = sshWinCol;
+              SendResponse(btCommand, UNAPI_ERR_OK, 2, btCommandData);
+            } else if (getSet == 1) {
+              // SET
+              if (uiCmdDataLen < 3) {
+                SendResponse(btCommand, UNAPI_ERR_INV_PARAM, 0, 0);
+              } else {
+                byte result = sshSetWinSize(btCommandData[1], btCommandData[2]);
+                SendResponse(btCommand, result, 0, 0);
+              }
+            } else {
+              SendResponse(btCommand, UNAPI_ERR_INV_PARAM, 0, 0);
+            }
+          }
+        }
+        break;
 
         default:
           SendResponse(btCommand,UNAPI_ERR_NOT_IMP,0,0);

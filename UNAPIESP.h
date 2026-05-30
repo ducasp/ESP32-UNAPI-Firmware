@@ -1,7 +1,7 @@
 /*
 UNAPIESP.h
     ESP32 UNAPI Implementation.
-    Revision 1.50
+    Revision 1.00
 
 Requires Arduino IDE and ESP32 libraries
 
@@ -58,10 +58,10 @@ enum CommandTypes {
 };
 
 enum RxDataParserStates {
-	RX_PARSER_IDLE = 0,
-	RX_PARSER_WAIT_DATA_SIZE,
-	RX_PARSER_GET_DATA,
-	RX_PARSER_PROCCESS_CMD
+  RX_PARSER_IDLE = 0,
+  RX_PARSER_WAIT_DATA_SIZE,
+  RX_PARSER_GET_DATA,
+  RX_PARSER_PROCCESS_CMD
 };
 
 enum ConnectionStates {
@@ -69,11 +69,16 @@ enum ConnectionStates {
   CONN_UDP = 1,
   CONN_TCP_ACTIVE = 2,
   CONN_TCP_PASSIVE = 3,
-  CONN_TCP_TLS_A = 4
+  CONN_TCP_TLS_A = 4,
+  CONN_SSH = 5
 };
 
+// IMPORTANT!!!!
+// Never add any custom function lower than ' ' (0x20) or higher than DEL (0x7F)
+// Command ranges 0x00 to 0x19 are reserved for TCP-IP UNAPI commands
+// Command ranges 0x7F to 0xFF are reserved for SSH UNAPI commands and additional TCP-IP UNAPI commands not in spec (i.e.: http client)
 enum CustomFunctions {
-	CUSTOM_F_RESET = 'R',
+  CUSTOM_F_RESET = 'R',
   CUSTOM_F_RETRY_TX = 'r',
   CUSTOM_F_SCAN = 'S',
   CUSTOM_F_SCAN_R = 's',
@@ -106,47 +111,62 @@ enum CustomFunctions {
   CUSTOM_F_QUERY = '?'
 };
 
-enum TcpipUnapiFunctions {  
+// MUST NEVER GO BEYOND 33 for standard TCP-IP UNAPI functions
+// MUST NEVER BE BELOW 129 for standard SSH UNAPI functions OR extended TCP-IP UNAPI functions
+enum TcpipUnapiFunctions {
   TCPIP_GET_CAPAB = 1,
   TCPIP_GET_IPINFO = 2,
   TCPIP_NET_STATE = 3,
-	TCPIP_SEND_ECHO = 4,
-	TCPIP_RCV_ECHO = 5,
-	TCPIP_DNS_Q = 6,
+  TCPIP_SEND_ECHO = 4,
+  TCPIP_RCV_ECHO = 5,
+  TCPIP_DNS_Q = 6,
   TCPIP_DNS_Q_NEW = 206,
-	TCPIP_DNS_S = 7,
-	TCPIP_UDP_OPEN = 8,
+  TCPIP_DNS_S = 7,
+  TCPIP_UDP_OPEN = 8,
   TCPIP_UDP_CLOSE = 9,
-	TCPIP_UDP_STATE = 10,
+  TCPIP_UDP_STATE = 10,
   TCPIP_UDP_SEND = 11,
-	TCPIP_UDP_RCV = 12,
+  TCPIP_UDP_RCV = 12,
   TCPIP_TCP_OPEN = 13,
   TCPIP_TCP_CLOSE = 14,
   TCPIP_TCP_ABORT = 15,
   TCPIP_TCP_STATE = 16,
   TCPIP_TCP_SEND = 17,
   TCPIP_TCP_RCV = 18,
-	TCPIP_TCP_FLUSH = 19,
-	TCPIP_RAW_OPEN = 20,
-	TCPIP_RAW_CLOSE = 21,
-	TCPIP_RAW_STATE = 22,
-	TCPIP_RAW_SEND = 23,
-	TCPIP_RAW_RCV = 24,
-	TCPIP_CONFIG_AUTOIP = 25,
-	TCPIP_CONFIG_IP = 26,
-	TCPIP_CONFIG_TTL = 27,
-	TCPIP_CONFIG_PING = 28,
+  TCPIP_TCP_FLUSH = 19,
+  TCPIP_RAW_OPEN = 20,
+  TCPIP_RAW_CLOSE = 21,
+  TCPIP_RAW_STATE = 22,
+  TCPIP_RAW_SEND = 23,
+  TCPIP_RAW_RCV = 24,
+  TCPIP_CONFIG_AUTOIP = 25,
+  TCPIP_CONFIG_IP = 26,
+  TCPIP_CONFIG_TTL = 27,
+  TCPIP_CONFIG_PING = 28,
   TCPIP_WAIT = 29,
   TCPIP_HTTP_OPEN = 200,
   TCPIP_HTTP_RECEIVE = 201,
   TCPIP_HTTP_CLOSE = 202
 };
 
+// MUST NEVER GO BEYOND 33 for standard TCP-IP UNAPI functions
+// MUST NEVER BE BELOW 129 for standard SSH UNAPI functions OR extended TCP-IP UNAPI functions
+enum SshUnapiFunctions {
+  SSH_GET_CAPAB = 129,
+  SSH_OPEN = 130,
+  SSH_CLOSE = 131,
+  SSH_STATE = 132,
+  SSH_SEND = 133,
+  SSH_RCV = 134,
+  SSH_TERM_TYPE = 135,
+  SSH_WIN_SIZE = 136
+};
+
 enum TcpipUnapiGetCapabParam1
 {
-	TCPIP_GET_CAPAB_FLAGS = 1,
-	TCPIP_GET_CAPAB_CONN = 2,
-	TCPIP_GET_CAPAB_DGRAM = 3,
+  TCPIP_GET_CAPAB_FLAGS = 1,
+  TCPIP_GET_CAPAB_CONN = 2,
+  TCPIP_GET_CAPAB_DGRAM = 3,
   TCPIP_GET_SECONDARY_CAPAB_FLAGS = 4
 };
 
@@ -161,22 +181,53 @@ enum TcpipUnapiGetIpInfoParam1
 };
 
 enum TcpipErrorCodes {
-    UNAPI_ERR_OK = 0,			    
-    UNAPI_ERR_NOT_IMP,		
-    UNAPI_ERR_NO_NETWORK,		
-    UNAPI_ERR_NO_DATA,		
-    UNAPI_ERR_INV_PARAM,		
-    UNAPI_ERR_QUERY_EXISTS,	
-    UNAPI_ERR_INV_IP,		    
-    UNAPI_ERR_NO_DNS,		    
-    UNAPI_ERR_DNS,		    
-    UNAPI_ERR_NO_FREE_CONN,	
-    UNAPI_ERR_CONN_EXISTS,	
-    UNAPI_ERR_NO_CONN,		
-    UNAPI_ERR_CONN_STATE,		
-    UNAPI_ERR_BUFFER,		    
-    UNAPI_ERR_LARGE_DGRAM,	
-    UNAPI_ERR_INV_OPER
+  UNAPI_ERR_OK = 0,
+  UNAPI_ERR_NOT_IMP,
+  UNAPI_ERR_NO_NETWORK,
+  UNAPI_ERR_NO_DATA,
+  UNAPI_ERR_INV_PARAM,
+  UNAPI_ERR_QUERY_EXISTS,
+  UNAPI_ERR_INV_IP,
+  UNAPI_ERR_NO_DNS,
+  UNAPI_ERR_DNS,
+  UNAPI_ERR_NO_FREE_CONN,
+  UNAPI_ERR_CONN_EXISTS,
+  UNAPI_ERR_NO_CONN,
+  UNAPI_ERR_CONN_STATE,
+  UNAPI_ERR_BUFFER,
+  UNAPI_ERR_LARGE_DGRAM,
+  UNAPI_ERR_INV_OPER
 };
+
+enum SSHErrorCodes {
+  SSH_ERR_NO_RSS = 127,
+  SSH_ERR_INV_KEY,
+  SSH_ERR_PWD,
+  SSH_ERR_PTY_REQ
+};
+
+enum SshConnectionStates {
+  SSH_CLOSED = 0,
+  SSH_CONNECTING = 1,
+  SSH_AUTHENTICATING = 2,
+  SSH_CONNECTED = 3,
+  SSH_ERROR = 4
+};
+
+enum SshTerminalTypes {
+  TERM_VT52 = 0,
+  TERM_ANSI = 1,
+  TERM_XTERM = 2
+};
+
+enum SshSubsystems {
+  SSH_SUB_PTY = 0,
+  SSH_SUB_SFTP = 1,
+  SSH_SUB_SCP = 2,
+  SSH_SUB_RAW = 4
+};
+
+#define SSH_AUTH_PASSWORD  0
+#define SSH_AUTH_PUBKEY    1
 
 #endif

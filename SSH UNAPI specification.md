@@ -140,12 +140,17 @@ of 127 to 255.
 | 12 | ERR_CONN_STATE | Invalid connection state |
 | 13 | ERR_BUFFER | Insufficient output buffer space |
 | 15 | ERR_INV_OPER | Invalid operation |
+| 127 | SSH_ERR_NO_RSS | Not enough memory to create a new session |
+| 128 | SSH_ERR_INV_KEY | The key used as password is invalid format |
+| 129 | SSH_ERR_PWD | The key or password used to authenticate session was not accepted. |
+| 130 | SSH_ERR_PTY_REQ | An error occurred while requesting a shell for PTY |
 
 ## 4. API routines
 
-This version of the SSH API consists of 7 base SSH routines and additional SFTP, SCP and RAW subsystem routines, which are described
-below. API implementations may define their own additional implementation-specific
-routines, as described in the MSX-UNAPI specification.
+This version of the SSH API consists of routines that enables usage of PTY, SFTP, SCP
+and RAW subsystem routines, which are described below. API implementations may define
+their own additional implementation-specific routines, as described in the MSX-UNAPI
+specification.
 
 Routines are grouped in subsections by related behavior. Useful information concerning
 all the routines on a given subsection is provided at the beginning of each subsection.
@@ -333,6 +338,22 @@ There are no free connections available.
 The TCP connection to the remote server could not be established, or the SSH handshake
 or authentication failed.
 
+- SSH_ERR_NO_RSS
+
+There is not enough memory on the device handling SSH connections to create a new session.
+
+- SSH_ERR_INV_KEY
+
+The key to be used as password is not in a valid format.
+
+- SSH_ERR_PWD
+
+The key or password used to authenticate session was not accepted.
+
+- SSH_ERR_PTY_REQ
+
+An error occurred while requesting a shell for PTY.
+
 ---
 
 #### 4.2.2. SSH_CLOSE: Close an SSH connection
@@ -401,8 +422,8 @@ There is no SSH connection open with the specified number.
 - Input:
   - A = 5
   - B = Connection number
-  - HL = Address of the data to send
-  - DE = Data length
+  - DE = Address of the data to send
+  - HL = Data length
 
 - Output:
   - A = Error code
@@ -423,7 +444,7 @@ There is no SSH connection open with the specified number.
 
 - ERR_CONN_STATE
 
-The SSH connection is not in the "Connected" state.
+The SSH connection is not in the "Connected" state or failure while sending.
 
 - ERR_BUFFER
 
@@ -436,19 +457,19 @@ Insufficient buffer space to queue the data for sending.
 - Input:
   - A = 6
   - B = Connection number
-  - HL = Address for the received data
-  - DE = Maximum data size to retrieve
+  - DE = Address for the received data
+  - HL = Maximum data size to retrieve
 
 - Output:
   - A = Error code
-  - DE = Number of bytes actually retrieved
+  - BC = Number of bytes actually retrieved
 
 This routine retrieves incoming data from the SSH channel associated with the specified
 connection. This works for PTY and RAW subsystems. For other subsystems use only the
 functions designated for it.
 
-The maximum number of bytes that can be retrieved is specified in DE. The actual number
-of bytes retrieved is returned in DE. If no data is available, ERR_NO_DATA is returned.
+The maximum number of bytes that can be retrieved is specified in HL. The actual number
+of bytes retrieved is returned in BC. If no data is available, ERR_NO_DATA is returned.
 
 **ERROR CODES**
 
@@ -462,7 +483,7 @@ There is no SSH connection open with the specified number.
 
 - ERR_CONN_STATE
 
-The SSH connection is not in the "Connected" state.
+The SSH connection is not in the "Connected" state or failure while reading.
 
 - ERR_NO_DATA
 
@@ -483,7 +504,7 @@ No incoming data is available.
 
 - Output (when C=0):
   - A = Error code
-  - B = Terminal type
+  - D = Terminal type
 
 - Output (when C=1):
   - A = Error code
@@ -519,15 +540,10 @@ The operation completed successfully.
 
 There is no PTY subsystem capability.
 
-- ERR_NO_CONN
-
-There is no SSH connection open with the specified number.
-
 - ERR_INV_PARAM
 
   - An invalid value was specified for the operation (C).
   - An invalid terminal type was specified.
-  - Connection was not opened using PTY subsystem.
 
 ---
 
@@ -568,10 +584,6 @@ The operation completed successfully.
 - ERR_NOT_IMP
 
 There is no PTY subsystem capability.
-
-- ERR_NO_CONN
-
-There is no SSH connection open with the specified number.
 
 - ERR_INV_PARAM
 

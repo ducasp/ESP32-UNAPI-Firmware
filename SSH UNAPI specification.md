@@ -288,8 +288,9 @@ specified in the parameters block. The format of this block is:
   - 3: RAW
 - +7 (1): Flags:
   - bit 0: Authentication method (0 = password, 1 = public key)
+  - bit 1: Anonymous Authentication
   - bits 1-7: Unused, must be zero
-  +8 (variable):
+  +8 (variable, use two 00's if Anonymous Auth):
     - 0 to X: username, zero terminated
     - X to end: password or public key, zero terminated
 

@@ -973,21 +973,24 @@ static byte sshOpen(byte *params, unsigned int paramLen, byte *outConnNum) {
     return UNAPI_ERR_NOT_IMP;
   // Flags: bit 0 = auth method (0=password, 1=public key), bits 1-7 unused
   byte flags = params[7];
-  if (flags > 1)
+  if (flags > 3)
     return UNAPI_ERR_INV_PARAM;
   bool usePubKey = (flags & 0x01) != 0;
+  bool anonymousConnection = (flags & 0x02) != 0;
 
-  // Parse username (null-terminated, starts at offset 7)
   unsigned int userOff = 8;
   unsigned int userLen = 0;
-  while (userOff + userLen < paramLen && params[userOff + userLen] != 0) userLen++;
-  if (userLen == 0 || userOff + userLen >= paramLen) return UNAPI_ERR_INV_PARAM;
-
-  // Parse auth data (after username null)
   unsigned int authOff = userOff + userLen + 1;
   unsigned int authLen = 0;
-  while (authOff + authLen < paramLen && params[authOff + authLen] != 0) authLen++;
-  if (authLen == 0) return UNAPI_ERR_INV_PARAM;
+  if (!anonymousConnection) {
+    // Parse username (null-terminated, starts at offset 7)
+    while (userOff + userLen < paramLen && params[userOff + userLen] != 0) userLen++;
+    if (userLen == 0 || userOff + userLen >= paramLen) return UNAPI_ERR_INV_PARAM;
+
+    // Parse auth data (after username null)
+    while (authOff + authLen < paramLen && params[authOff + authLen] != 0) authLen++;
+    if (authLen == 0) return UNAPI_ERR_INV_PARAM;
+  }
 
   // Find free slot
   byte slot;
@@ -1029,8 +1032,15 @@ static byte sshOpen(byte *params, unsigned int paramLen, byte *outConnNum) {
       ssh_free(session);
       return SSH_ERR_PWD;
     }
-  } else {
+  } else if (!anonymousConnection){
     if (ssh_userauth_password(session, NULL, (const char*)&params[authOff]) != SSH_AUTH_SUCCESS) {
+      ssh_disconnect(session);
+      ssh_free(session);
+      return SSH_ERR_PWD;
+    }
+  }
+  else {
+    if (ssh_userauth_none(session, "") != SSH_AUTH_SUCCESS) {
       ssh_disconnect(session);
       ssh_free(session);
       return SSH_ERR_PWD;

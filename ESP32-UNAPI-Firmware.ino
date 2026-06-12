@@ -66,9 +66,7 @@ v0.3
 #include <base64.h>
 
 #define HTTP_PACKET_SIZE 2048
-
 SET_LOOP_TASK_STACK_SIZE(65536); // Set loopTask to 32KB, otherwise SSH functions will crash
-
 WiFiClientSecure *TClient1;
 static char *g_caPem = NULL;
 static size_t g_caPemLen = 0;
@@ -1680,7 +1678,8 @@ static byte sshAuthRespond(byte connNum, byte *responseBlock, unsigned int respL
   for (byte i = 0; i < count; i++) {
     if (off >= respLen) return UNAPI_ERR_INV_PARAM;
     const char *answer = (const char *)(responseBlock + off);
-    ssh_userauth_kbdint_setanswer(sshSessions[slot], i, answer);
+    if (ssh_userauth_kbdint_setanswer(sshSessions[slot], i, answer))
+      return SSH_ERR_PWD;
     off += strlen(answer) + 1;
   }
 
@@ -2548,12 +2547,12 @@ proccesscmd:
             // 3 - RAW
             // 8 - Built-in TCP/IP
             // 9 - Connection pool shared with built-in TCP/IP
-            // 10 - Support Public Key Authentication
-            // 11 - Support Keyboard-Interactive Authentication
+            // 10 - Support Public Key Authentication (removed for now, need to implement something and rethink)
+            // 11 - Support Keyboard-Interactive Authentication (it is here, tested, but seems libssh ESP32 has a bug with it, did not work for me, YMMV)
             // 12 - Support non ANSI code filtering on PTY
             // 13 - Host key verification (SSH_ADD_KNOWN_HOST)
             Serial.write(B00001001); //flags LSB
-            Serial.write(B00111111); //flags MSB (bit 13 = host key verification)
+            Serial.write(B00111011); //flags MSB (bit 13 = host key verification)
             Serial.write(4); //Max 4 simultaneous SSH conns
             Serial.write(4 - checkOpenConnections()); //Free SSH conns
             Serial.write(0x00); //DE LSB = 2048 max data per call

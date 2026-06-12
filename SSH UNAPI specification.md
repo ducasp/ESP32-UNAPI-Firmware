@@ -300,6 +300,7 @@ AUTH_GET_CHALLENGE, AUTH_RESPOND) or relevant for more than one subsystem (STATE
 - Input:
   - A = 2
   - HL = Address of the parameters block *(at least 44 bytes long block is recommended)*
+  - DE = Address of the public/private keys pair
 
 - Output:
   - A = Error code
@@ -331,12 +332,12 @@ specified in the parameters block. The format of this block is:
 
   The parameters block layout after the flags byte depends on the authentication method:
 
-  For password (bits 0-2 = 000) and public key (bits 0-2 = 001) methods:
+  For password (bits 0-2 = 000) method:
     +8 (variable):
       - 0 to X: username, zero terminated
       - X to end: password or public key, zero terminated
 
-  For anonymous authentication (bit 1 = 1):
+  For anonymous authentication (bit 1 = 1) and public key (bits 0-2 = 001):
     +8 (variable):
       - Two consecutive zero bytes (no username, no credentials)
 
@@ -375,6 +376,10 @@ the implementation writes the 44 bytes Base64 Encode of the SHA-256 hash of the 
 server's public key into the parameter block (from it's start, overwriting any parameters),
 implementations are responsible for calculating the hash, Base64 Encode it and make the
 result a NULL terminated string that has the padding removed.
+
+When doing public key authentication, you must have the private and public key in PEM
+format loaded in the memory area pointed by DE. First private, then 00 to indicate it has
+ended and next the public key, also with a 00 at the end to indicate it has ended.
 
 Only one SSH connection can exist per connection number. If the connection is opened
 successfully, the returned connection number must be used in all subsequent SSH-related

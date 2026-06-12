@@ -159,7 +159,10 @@ enum SshUnapiFunctions {
   SSH_SEND = 133,
   SSH_RCV = 134,
   SSH_TERM_TYPE = 135,
-  SSH_WIN_SIZE = 136
+  SSH_WIN_SIZE = 136,
+  SSH_AUTH_GET_CHALLENGE = 137,
+  SSH_AUTH_RESPOND = 138,
+  SSH_ADD_KNOWN_HOST = 139
 };
 
 enum TcpipUnapiGetCapabParam1
@@ -203,7 +206,9 @@ enum SSHErrorCodes {
   SSH_ERR_NO_RSS = 127,
   SSH_ERR_INV_KEY,
   SSH_ERR_PWD,
-  SSH_ERR_PTY_REQ
+  SSH_ERR_PTY_REQ,
+  SSH_ERR_AUTH_TRY_OTHER,
+  SSH_ERR_UNKNOWN_HOST
 };
 
 enum SshConnectionStates {
@@ -211,7 +216,9 @@ enum SshConnectionStates {
   SSH_CONNECTING = 1,
   SSH_AUTHENTICATING = 2,
   SSH_CONNECTED = 3,
-  SSH_ERROR = 4
+  SSH_ERROR = 4,
+  SSH_AUTH_CHALLENGE = 5,
+  SSH_HOST_UNKNOWN = 6
 };
 
 enum SshTerminalTypes {
@@ -229,5 +236,30 @@ enum SshSubsystems {
 
 #define SSH_AUTH_PASSWORD  0
 #define SSH_AUTH_PUBKEY    1
+
+#define SSH_KNOWN_HOST_HASH_SIZE 32
+#define SSH_KNOWN_HOSTS_FILE "/ssh_known_hosts"
+#define SSH_CRED_USER_MAX 128
+#define SSH_CRED_SECRET_MAX 2048
+
+// State Machine States
+typedef enum {
+    STATE_TEXT,             // Plain text or standard control characters (\r, \n, \b)
+    STATE_ESC,              // Found ESC (\x1b)
+    STATE_CSI,              // Found CSI (ESC [)
+    STATE_SKIP_CSI,         // Discard state for unsupported CSI sequences (Xterm/Mouse)
+    STATE_SKIP_OSC          // Discard state for OSC commands (Windows window titles)
+} parse_state_t;
+
+// Bundle all state variables into a single struct
+struct SshFilterState {
+    uint8_t carryover[128];
+    int carry_len;
+    parse_state_t state;
+    bool drop_sequence;
+    bool is_extended_color;
+    int current_param;
+    int prev_param;
+};
 
 #endif

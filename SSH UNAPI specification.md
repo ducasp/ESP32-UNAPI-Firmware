@@ -34,6 +34,12 @@
 
 [4.2.5. SSH_RCV: Receive data from an SSH connection](#425-ssh_rcv-receive-data-from-an-ssh-connection)
 
+[4.2.6. SSH_AUTH_GET_CHALLENGE: Get the current keyboard-interactive authentication challenge](#426-ssh_auth_get_challenge-get-the-current-keyboard-interactive-authentication-challenge)
+
+[4.2.7. SSH_AUTH_RESPOND: Respond to a keyboard-interactive authentication challenge](#427-ssh_auth_respond-respond-to-a-keyboard-interactive-authentication-challenge)
+
+[4.2.8. SSH_ADD_KNOWN_HOST: Accept an unknown host key and resume connection](#428-ssh_add_known_host-accept-an-unknown-host-key-and-resume-connection)
+
 [4.3. SSH PTY specific routines](#43-ssh-pty-specific-routines)
 
 [4.3.1. SSH_TERM_TYPE: Get/set the SSH terminal type](#431-ssh_term_type-getset-the-ssh-terminal-type)
@@ -43,6 +49,10 @@
 [4.4. SSH SFTP specific routines](#44-ssh-sftp-specific-routines)
 
 [4.5. SSH SCP specific routines](#45-ssh-scp-specific-routines)
+
+[4.6. Usage examples](#46-usage-examples)
+
+[4.6.1. Keyboard-interactive authentication example](#461-keyboard-interactive-authentication-example)
 
 ## 1. Introduction
 
@@ -144,6 +154,8 @@ of 127 to 255.
 | 128 | SSH_ERR_INV_KEY | The key used as password is invalid format |
 | 129 | SSH_ERR_PWD | The key or password used to authenticate session was not accepted. |
 | 130 | SSH_ERR_PTY_REQ | An error occurred while requesting a shell for PTY |
+| 131 | SSH_ERR_AUTH_TRY_OTHER | The remote server denied the requested authentication mode |
+| 132 | SSH_ERR_UNKNOWN_HOST | The remote server's host key could not be verified against the known hosts list |
 
 ## 4. API routines
 
@@ -204,6 +216,7 @@ This routine never fails. ERR_OK is always returned.
     - HL = Capabilities flags
     - B = Maximum simultaneous SSH connections supported
     - C = Free SSH connections currently available
+    - DE = Maximum data size per SSH_SEND and SSH_RCV call (0 = no documented limit)
 
     Other information blocks are not currently supported in this specification. There is
     a provision for multiple blocks just in case those are needed in future.
@@ -239,9 +252,9 @@ Bit 0 is LSB of register L, bit 8 is LSB of register H.
 - Bit 8: Built-in TCP/IP
 - Bit 9: Connection pool shared with built-in TCP/IP
 - Bit 10: Supports Public Key Authentication
-- Bit 11: Always set to 0
-- Bit 12: Always set to 0
-- Bit 13: Always set to 0
+- Bit 11: Supports Keyboard-Interactive Authentication
+- Bit 12: Supports non ANSI Escape Code filtering on PTY
+- Bit 13: Supports host key verification
 - Bit 14: Always set to 0
 - Bit 15: Always set to 0
 
@@ -264,7 +277,8 @@ Invalid information block index specified.
 ### 4.2. SSH common routines
 
 Those are routines that are either used for all subsystems (OPEN and CLOSE) or
-relevant for more than one subsystem (STATE, SEND and RCV are used for PTY and RAW).
+relevant for more than one subsystem (STATE, SEND, RCV, AUTH_GET_CHALLENGE and
+AUTH_RESPOND).
 
 #### 4.2.1. SSH_OPEN: Open an SSH client connection
 
@@ -287,12 +301,39 @@ specified in the parameters block. The format of this block is:
   - 2: SCP
   - 3: RAW
 - +7 (1): Flags:
-  - bit 0: Authentication method (0 = password, 1 = public key)
-  - bit 1: Anonymous Authentication
-  - bits 1-7: Unused, must be zero
-  +8 (variable, use two 00's if Anonymous Auth):
-    - 0 to X: username, zero terminated
-    - X to end: password or public key, zero terminated
+  - bit 0: Authentication method (0 = password, 1 = public key). Ignored when bit 2 is set.
+  - bit 1: Anonymous Authentication. Cannot be combined with bit 2.
+  - bit 2: Keyboard-Interactive Authentication. When set, the connection enters the
+    AuthChallenge state after the SSH handshake, and the application must complete
+    authentication using SSH_AUTH_GET_CHALLENGE and SSH_AUTH_RESPOND.
+  - bit 3: Non ANSI Escape Code filtering on PTY (only for PTY subsystem)
+  - bit 4: Host key verification. When set, the implementation checks the remote
+    server's host key against the known hosts list after the SSH handshake. If the
+    host key is unknown, SSH_ERR_UNKNOWN_HOST is returned along with a valid
+    connection number, and the connection enters state 6 (HostUnknown). See the
+    SSH_ERR_UNKNOWN_HOST error description below for more details.
+  - bits 5-7: Unused, must be zero
+
+  The parameters block layout after the flags byte depends on the authentication method:
+
+  For password (bits 0-2 = 000) and public key (bits 0-2 = 001) methods:
+    +8 (variable):
+      - 0 to X: username, zero terminated
+      - X to end: password or public key, zero terminated
+
+  For anonymous authentication (bit 1 = 1):
+    +8 (variable):
+      - Two consecutive zero bytes (no username, no credentials)
+
+  For keyboard-interactive (bit 2 = 1):
+    +8 (variable):
+      - 0 to X: username, zero terminated
+      - X to end: no password or key follows (only the username is provided)
+
+  When flag bit 4 (host key verification) is set, the caller MUST ensure the
+  parameters block has at least 44 bytes to be used. If SSH_ERR_UNKNOWN_HOST is returned,
+  the implementation writes the 44 bytes Base64 Encode of the SHA-256 hash of the remote
+  server's public key into the parameter block (from it's start, overwriting any parameters).
 
 This routine initiates the SSH connection process. The implementation must establish a
 TCP connection to the specified remote IP address and port, perform the SSH handshake,
@@ -303,6 +344,14 @@ with the terminal type and window size previously set via SSH_TERM_TYPE and SSH_
 (or the defaults), and then a remote shell is started.
 Data can then be exchanged using SSH_SEND and SSH_RCV for PTY and RAW connections.
 For SFTP and SCP subsystems, use the dedicated functions described in their respective sections.
+
+When keyboard-interactive authentication is selected (flag bit 2 set), the authentication
+process does not complete within SSH_OPEN. Instead, after the SSH handshake the connection
+enters the AuthChallenge (state 5) state. The implementation does not open the SSH channel
+or perform any subsystem-specific operations until authentication is completed via the
+SSH_AUTH_GET_CHALLENGE and SSH_AUTH_RESPOND routines. The application must poll SSH_STATE
+to detect when authentication succeeds (state transitions to Connected) or fails (state
+transitions to Error).
 
 Only one SSH connection can exist per connection number. If the connection is opened
 successfully, the returned connection number must be used in all subsequent SSH-related
@@ -316,9 +365,9 @@ The SSH connection has been initiated. The returned connection number is valid.
 
 - ERR_NOT_IMP
 
-The implementation does not support the requested subsystem, or, public key authentication
-was requested but the implementation does not support it (as indicated by the appropriate
-capability flag).
+The implementation does not support the requested subsystem, or, public key or
+keyboard-interactive authentication was requested but the implementation does not
+support it (as indicated by the appropriate capability flag).
 
 - ERR_INV_PARAM
 
@@ -355,6 +404,34 @@ The key or password used to authenticate session was not accepted.
 
 An error occurred while requesting a shell for PTY.
 
+- SSH_ERR_AUTH_TRY_OTHER
+
+The remote server requires keyboard-interactive authentication but a different
+authentication method was requested via the flags field.
+
+- SSH_ERR_UNKNOWN_HOST
+
+Host key verification was requested (flag bit 4 set) and the remote server's host
+key could not be verified against the known hosts list. The connection enters the
+HostUnknown (state 6) state.
+
+A valid connection number is returned in B. The SSH handshake is kept alive and
+the implementation caches the server's public key hash and the authentication
+credentials provided in the SSH_OPEN call.
+
+The application must retrieve the 32-byte SHA-256 hash of the server's public key
+from the reserved area at offset paramLen of the parameters block (see above), and
+then choose one of the following actions:
+
+- **Accept the host key**: Call SSH_ADD_KNOWN_HOST with the connection number.
+  The implementation persists the cached hash to the known hosts list, then resumes
+  the connection — authentication, channel opening and subsystem setup are carried
+  out using the credentials from the original SSH_OPEN call. The connection
+  transitions to Connected (state 3) on success, or to Error (state 4) on failure.
+
+- **Reject the host key**: Call SSH_CLOSE with the connection number. The connection
+  is terminated normally.
+
 ---
 
 #### 4.2.2. SSH_CLOSE: Close an SSH connection
@@ -367,7 +444,8 @@ An error occurred while requesting a shell for PTY.
   - A = Error code
 
 This routine closes the specified SSH connection. The SSH session is terminated, and
-the connection number is freed.
+the connection number is freed. This routine is valid in any connection state,
+including AuthChallenge (state 5) and HostUnknown (state 6).
 
 **ERROR CODES**
 
@@ -390,7 +468,7 @@ There is no SSH connection open with the specified number.
 - Output:
   - A = Error code
   - B = Connection state
-  - HL = Number of total available incoming bytes
+  - HL = State-dependent value (see description below)
 
 This routine returns information about the current state of an open SSH connection.
 
@@ -402,9 +480,23 @@ one of the following values:
 - 2: Authenticating — TCP connected, SSH handshake and authentication in progress
 - 3: Connected — SSH session established, channel open, data can be exchanged
 - 4: Error — An error occurred during connection, authentication, or data exchange
+- 5: AuthChallenge — SSH session handshake completed. The remote server has sent a
+  keyboard-interactive authentication challenge. The application must retrieve it via
+  SSH_AUTH_GET_CHALLENGE and respond via SSH_AUTH_RESPOND.
+- 6: HostUnknown — SSH handshake completed but the remote server's host key was not
+  found in the known hosts list. The application must either accept the host key via
+  SSH_ADD_KNOWN_HOST (which resumes the connection) or close the connection via
+  SSH_CLOSE.
 
-The **Number of total available incoming bytes** value indicates how many bytes have
-been received from the SSH channel and can be retrieved by using the SSH_RCV routine.
+The meaning of the **HL** register depends on the connection state:
+
+- States 0-2, 4 (Closed, Connecting, Authenticating, Error): HL = 0
+- State 3 (Connected): HL = Number of total available incoming bytes that can be
+  retrieved by using the SSH_RCV routine.
+- State 5 (AuthChallenge): HL = Buffer size required to call SSH_AUTH_GET_CHALLENGE.
+  The application should allocate a buffer of at least this size before calling
+  SSH_AUTH_GET_CHALLENGE.
+- State 6 (HostUnknown): HL = 0
 
 **ERROR CODES**
 
@@ -445,7 +537,8 @@ There is no SSH connection open with the specified number.
 
 - ERR_CONN_STATE
 
-The SSH connection is not in the "Connected" state or failure while sending.
+The SSH connection is not in the "Connected" state (e.g., it is in AuthChallenge state)
+or a failure occurred while sending.
 
 - ERR_BUFFER
 
@@ -484,11 +577,202 @@ There is no SSH connection open with the specified number.
 
 - ERR_CONN_STATE
 
-The SSH connection is not in the "Connected" state or failure while reading.
+The SSH connection is not in the "Connected" state (e.g., it is in AuthChallenge state)
+or a failure occurred while reading.
 
 - ERR_NO_DATA
 
 No incoming data is available.
+
+---
+
+#### 4.2.6. SSH_AUTH_GET_CHALLENGE: Get the current keyboard-interactive authentication challenge
+
+- Input:
+  - A = 9
+  - B = Connection number
+  - DE = Address of the caller-provided buffer
+  - HL = Maximum buffer size
+
+- Output:
+  - A = Error code
+  - H = Number of prompts
+  - L = Echo flags (bit N set = echo the response for prompt N)
+  - BC = Number of bytes written to the buffer (or required size if ERR_BUFFER)
+
+This routine retrieves the current keyboard-interactive authentication challenge from
+the remote server for the specified connection. The connection must be in the
+AuthChallenge (state 5) state; otherwise, ERR_CONN_STATE is returned.
+
+The challenge data is written to the caller-provided buffer as a sequence of
+zero-terminated strings in the following order:
+
+  Name\0Instruction\0Prompt1\0Prompt2\0\0
+
+- **Name**: A short name identifying the challenge (may be empty, i.e., starts with 00h).
+- **Instruction**: A longer instruction or banner text (may be empty).
+- **Prompt1, Prompt2, ...**: One zero-terminated string for each prompt, in order.
+  The number of prompts is returned in register B.
+- **Final terminator**: An additional zero byte after the last prompt string.
+
+The **echo flags** in register C indicate, for each prompt, whether the user's response
+should be displayed (echoed) as it is typed. If bit N is set, the response to prompt N
+should be echoed; if cleared, the response should not be echoed (e.g., for passwords).
+
+If the supplied buffer is too small to hold the complete challenge data, ERR_BUFFER is
+returned, no data is consumed from the implementation's internal state, and HL returns
+the required buffer size. The caller may retry with a larger buffer. The application can
+determine the required size in advance by calling SSH_STATE while the connection is in
+AuthChallenge state, which returns the required buffer size in HL.
+
+**ERROR CODES**
+
+- ERR_OK
+
+The challenge data has been written to the buffer.
+
+- ERR_NOT_IMP
+
+Keyboard-interactive authentication is not supported.
+
+- ERR_NO_CONN
+
+There is no SSH connection open with the specified number.
+
+- ERR_CONN_STATE
+
+The connection is not in the AuthChallenge state.
+
+- ERR_BUFFER
+
+The supplied buffer is too small. HL returns the required size. No data is consumed;
+the caller may retry with a larger buffer.
+
+---
+
+#### 4.2.7. SSH_AUTH_RESPOND: Respond to a keyboard-interactive authentication challenge
+
+- Input:
+  - A = 10
+  - B = Connection number
+  - DE = Address of the response block
+  - HL = Length of the response block
+
+- Output:
+  - A = Error code
+
+This routine sends responses to the current keyboard-interactive authentication
+challenge for the specified connection. The connection must be in the AuthChallenge
+(state 5) state; otherwise, ERR_CONN_STATE is returned.
+
+The response block format is:
+
+  +0 (1): Number of responses (must match the number of prompts from the challenge)
+  +1 (variable): Response string for prompt 1, zero terminated
+  ... (variable): Response string for prompt 2, zero terminated
+  ... ...
+  ... (1): Additional zero terminator (final 00h)
+
+The number of responses must match the number of prompts returned by the last
+SSH_AUTH_GET_CHALLENGE call. Each response is provided as a zero-terminated string in
+the same order as the prompts.
+
+After sending the responses, the connection state transitions as follows:
+
+- **Connected** (state 3): Authentication succeeded. The implementation completes the
+  SSH channel opening and performs the subsystem operations appropriate for the
+  subsystem requested in SSH_OPEN (e.g., for PTY, request a pseudo-terminal and start
+  the remote shell).
+- **AuthChallenge** (state 5): The server has sent another challenge. The application
+  should call SSH_AUTH_GET_CHALLENGE again and repeat the process (multi-round
+  authentication).
+- **Error** (state 4): Authentication failed.
+
+**ERROR CODES**
+
+- ERR_OK
+
+The response has been sent to the server.
+
+- ERR_NOT_IMP
+
+Keyboard-interactive authentication is not supported.
+
+- ERR_NO_CONN
+
+There is no SSH connection open with the specified number.
+
+- ERR_CONN_STATE
+
+The connection is not in the AuthChallenge state.
+
+- SSH_ERR_PWD
+
+The remote server did not accept the provided responses.
+
+---
+
+#### 4.2.8. SSH_ADD_KNOWN_HOST: Accept an unknown host key and resume connection
+
+- Input:
+  - A = 11
+  - B = Connection number (returned by SSH_OPEN when SSH_ERR_UNKNOWN_HOST was produced)
+
+- Output:
+  - A = Error code
+
+This routine accepts the remote server's host key that was found unknown during
+a prior SSH_OPEN call with flag bit 4 set. The implementation persists the
+cached host key hash to its known hosts list, then **resumes** the connection
+from where it was suspended:
+
+1. The host key hash is added to the persistent known hosts list.
+2. Authentication proceeds using the credentials originally provided in SSH_OPEN.
+3. If authentication succeeds, the SSH channel is opened.
+4. If a subsystem was requested (PTY, RAW, etc.), the subsystem setup is performed.
+
+After a successful call, the connection transitions to **Connected** (state 3)
+and is ready for data exchange using SSH_SEND and SSH_RCV, exactly as if
+SSH_OPEN had returned ERR_OK directly.
+
+If any step fails, an appropriate error code is returned and the connection
+transitions to **Error** (state 4).
+
+**ERROR CODES**
+
+- ERR_OK
+
+The host key has been accepted, stored in the known hosts list, and the
+connection has been fully established. The connection is in Connected state.
+
+- ERR_NOT_IMP
+
+Host key verification is not supported (capability bit 13 not set).
+
+- ERR_NO_CONN
+
+There is no SSH connection open with the specified number, or the connection
+is not in the HostUnknown (state 6) state.
+
+- ERR_BUFFER
+
+The known hosts list is full and no more entries can be added.
+
+- ERR_NO_DATA
+
+The host key hash could not be persisted to storage (e.g., filesystem error).
+
+- SSH_ERR_PWD
+
+The key or password used to authenticate the session was not accepted.
+
+- SSH_ERR_PTY_REQ
+
+An error occurred while requesting a shell for PTY.
+
+- ERR_NO_CONN
+
+The connection could not be resumed (e.g., the remote server disconnected).
 
 ---
 
@@ -598,6 +882,157 @@ To be defined in a future revision
 ### 4.5. SSH SCP specific routines
 
 To be defined in a future revision
+
+### 4.6. Usage examples
+
+#### 4.6.1. Keyboard-interactive authentication example
+
+The following diagram illustrates the flow of a keyboard-interactive authentication
+session:
+
+```
+  Application                    SSH Implementation              Remote Server
+      |                                 |                             |
+      |-- SSH_OPEN(bit2=1,user) ------>|                             |
+      |<-- ERR_OK, conn=B -------------|                             |
+      |                                 |--- TCP connect ----------->|
+      |                                 |<-- TCP established --------|
+      |                                 |--- SSH handshake --------->|
+      |                                 |<-- handshake done ---------|
+      |                                 |--- "none" auth probe ----->|
+      |                                 |<-- keyboard-interactive ---|
+      |                                 |      challenge             |
+      |                                 |                             |
+      |-- SSH_STATE(conn) ------------>|                             |
+      |<-- B=5 (AuthChallenge), HL=n --|                             |
+      |                                 |                             |
+      |-- SSH_AUTH_GET_CHALLENGE(conn)->|                             |
+      |<-- prompts, echo_flags, data --|                             |
+      |                                 |                             |
+      |   [Display: Name,               |                             |
+      |    Instruction,                 |                             |
+      |    For each prompt:             |                             |
+      |      print prompt string        |                             |
+      |      read user input            |                             |
+      |    Build response block]        |                             |
+      |                                 |                             |
+      |-- SSH_AUTH_RESPOND(conn,resp)->|                             |
+      |                                 |--- responses ------------->|
+      |                                 |<-- auth result ------------|
+      |                                 |                             |
+      |-- SSH_STATE(conn) ------------>|                             |
+      |<-- state                       |                             |
+      |                                 |                             |
+      |   [if state == AuthChallenge:   |                             |
+      |      goto GET_CHALLENGE        |                             |
+      |    if state == Connected:       |                             |
+      |      use SSH_SEND/SSH_RCV      |                             |
+      |    if state == Error:           |                             |
+      |      abort]                     |                             |
+```
+
+Below is a C code example illustrating the same flow. The routines are presented as
+function calls for clarity; actual UNAPI implementations use register-based calls.
+
+```c
+/*
+ * Example: keyboard-interactive SSH login.
+ * Assumes SSH_OPEN was called with bit 2 set and returned conn.
+ * Assumes terminal type and window size were configured beforehand.
+ */
+
+struct ssh_open_params {
+    uint32_t ip;          // +0: remote IP address
+    uint16_t port;        // +4: remote port
+    uint8_t  subsystem;   // +6: subsystem (0 = PTY)
+    uint8_t  flags;       // +7: flags (bit 2 = keyboard-interactive)
+    char     username[];  // +8: zero-terminated username
+};
+
+uint8_t ssh_login_keyboard_interactive(uint8_t conn)
+{
+    uint8_t  challenge_buf[512];
+    uint8_t  response_buf[256];
+    uint8_t  state, num_prompts, echo_flags;
+    uint16_t size;
+
+    while (1) {
+        // Check connection state
+        state = ssh_state(conn);  // A = 4
+
+        if (state == STATE_CONNECTED) {
+            // PTY + shell ready, proceed with data exchange
+            return ERR_OK;
+        }
+
+        if (state == STATE_ERROR) {
+            return SSH_ERR_PWD;
+        }
+
+        if (state != STATE_AUTH_CHALLENGE) {
+            // Still connecting or authenticating, wait
+            continue;
+        }
+
+        // Retrieve the challenge
+        num_prompts = ssh_auth_get_challenge(
+            conn,
+            challenge_buf,
+            sizeof(challenge_buf),
+            &echo_flags,
+            &size
+        );
+
+        if (num_prompts == 0) {
+            return ERR_CONN_STATE;
+        }
+
+        // Parse: Name\0 Instruction\0 Prompt1\0 Prompt2\0 \0
+        char *name        = (char *)challenge_buf;
+        char *instruction = name + strlen(name) + 1;
+        char *prompt_ptr  = instruction + strlen(instruction) + 1;
+
+        // Display challenge info
+        if (name[0] != '\0')
+            printf("%s\n", name);
+        if (instruction[0] != '\0')
+            printf("%s\n", instruction);
+
+        // Build response block
+        response_buf[0] = num_prompts;   // count byte
+        uint8_t *resp_ptr = response_buf + 1;
+
+        for (uint8_t i = 0; i < num_prompts; i++) {
+            uint8_t echo = (echo_flags >> i) & 1;
+
+            printf("%s: ", prompt_ptr);
+
+            if (echo) {
+                // Echo input (e.g., username)
+                gets((char *)resp_ptr);
+            } else {
+                // No echo (e.g., password)
+                get_password_no_echo((char *)resp_ptr);
+                printf("\n");
+            }
+
+            resp_ptr += strlen((char *)resp_ptr) + 1;
+            prompt_ptr += strlen(prompt_ptr) + 1; // next prompt string
+        }
+
+        *resp_ptr++ = '\0';  // final terminator
+
+        // Send responses
+        uint8_t err = ssh_auth_respond(conn, response_buf);
+        if (err != ERR_OK)
+            return err;
+
+        // Loop: check state again (Connected, AuthChallenge, or Error)
+    }
+}
+```
+
+---
 
 ## 5. Change log
 

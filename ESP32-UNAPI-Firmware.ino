@@ -63,10 +63,11 @@ v0.3
 #include <EEPROM.h>
 #include "HTTPClient.h"
 #include "mbedtls/md.h"
+#include <base64.h>
 
 #define HTTP_PACKET_SIZE 2048
 
-SET_LOOP_TASK_STACK_SIZE(32768); // Set loopTask to 32KB, otherwise SSH functions will crash
+SET_LOOP_TASK_STACK_SIZE(65536); // Set loopTask to 32KB, otherwise SSH functions will crash
 
 WiFiClientSecure *TClient1;
 static char *g_caPem = NULL;
@@ -79,6 +80,7 @@ bool bHasHostName = false;
 
 const char chVer[4] = "1.0";
 byte btConnections[4] = {CONN_CLOSED,CONN_CLOSED,CONN_CLOSED,CONN_CLOSED};
+bool btSSHFilter[4] = {false,false,false,false};
 //UDP Objects
 WiFiUDP Udp1, Udp2, Udp3, Udp4;
 //TCP Connection Objects
@@ -145,6 +147,24 @@ static ssh_channel sshChannels[4] = {NULL, NULL, NULL, NULL};
 static uint8_t sshTermType = TERM_VT52;
 static uint8_t sshWinRow = 24;
 static uint8_t sshWinCol = 40;
+
+// SSH keyboard-interactive authentication state
+static bool    sshKbdIntActive[4]         = {false, false, false, false};
+static byte    sshSubsystems[4]           = {0, 0, 0, 0};
+#define SSH_CHALLENGE_BUF_SIZE 512
+static byte    sshChallengeData[4][SSH_CHALLENGE_BUF_SIZE];
+static unsigned int sshChallengeDataLen[4] = {0, 0, 0, 0};
+static byte    sshChallengePrompts[4]      = {0, 0, 0, 0};
+static byte    sshChallengeEchoFlags[4]    = {0, 0, 0, 0};
+
+// SSH host key verification state (per-slot)
+static uint8_t   sshPendingHash[4][SSH_KNOWN_HOST_HASH_SIZE];
+static bool      sshPendingHashValid[4]    = {false, false, false, false};
+static uint8_t   sshPendingAuthType[4];     // 0=pwd, 1=pubkey, 2=kbd-int, 3=anon
+static char      sshPendingUser[4][SSH_CRED_USER_MAX];
+static uint8_t   sshPendingSecret[4][SSH_CRED_SECRET_MAX];
+static uint16_t  sshPendingSecretLen[4];
+static bool      sshPendingValid[4]         = {false, false, false, false};
 
 // ======================== Helper Functions ========================
 void WaitConnectionIfNeeded(bool bFastReturn);
@@ -484,6 +504,7 @@ void setup() {
   if (!FFat.begin(false)) {
     FFat.begin(true);
   }
+  initKnownHostsFile();
 
   WiFi.setSleep(false);
   WiFi.persistent(true);
@@ -953,7 +974,179 @@ void WarmBoot() {
   }
 }
 
-// ======================== SSH Helper Functions ========================
+/**
+ * Filters the SSH buffer in-place using a static carryover state machine.
+ * Supports up to 4 concurrent connections (conn_id 1 to 4).
+ * Skips invalid ANSI sequences by rewinding the write pointer (O(N) squeeze).
+ */
+void filter_ssh_buffer_inplace(uint8_t conn_id, uint8_t *buffer, int *length, bool reset = false) {
+    // 1. Enforce bounds to prevent memory corruption (must be 1, 2, 3, or 4)
+    if (conn_id < 1 || conn_id > 4) {
+        return; 
+    }
+
+    // 2. Create the persistent array of states for the 4 connections.
+    // They are automatically initialized to zero/false/STATE_TEXT on the first boot.
+    static SshFilterState connections[4];
+
+    // 3. Grab a reference to the specific connection's state block (offset by -1 for 0-indexing)
+    SshFilterState &s = connections[conn_id - 1];
+
+    // --- THE RESET BLOCK ---
+    if (reset) {
+        s.carry_len = 0;
+        s.state = STATE_TEXT;
+        s.drop_sequence = false;
+        s.is_extended_color = false;
+        s.current_param = 0;
+        s.prev_param = 0;
+        return; // Exit immediately
+    }
+
+    // Standard safety checks
+    if (buffer == NULL || length == NULL || *length <= 0) {
+        return;
+    }
+
+    // Inject carryover from the previous split sequence for THIS connection
+    if (s.carry_len > 0) {
+        memmove(buffer + s.carry_len, buffer, *length);
+        memcpy(buffer, s.carryover, s.carry_len);
+        *length += s.carry_len;
+        s.carry_len = 0;
+    }
+
+    int read_idx = 0;
+    int write_idx = 0;
+    int input_len = *length;
+    int seq_start_idx = 0;
+
+    while (read_idx < input_len) {
+        uint8_t c = buffer[read_idx++];
+        
+        // Tentatively write every character.
+        buffer[write_idx++] = c;
+
+        switch (s.state) {
+            case STATE_TEXT:
+                if (c == 0x1B) {
+                    s.state = STATE_ESC;
+                    seq_start_idx = write_idx - 1;
+                    s.drop_sequence = false;
+                }
+                break;
+
+            case STATE_ESC:
+                if (c == '[') {
+                    s.state = STATE_CSI;
+                    s.is_extended_color = false;
+                    s.current_param = 0;
+                    s.prev_param = 0;
+                } 
+                else if (c == ']') {
+                    s.state = STATE_SKIP_OSC;
+                    s.drop_sequence = true;
+                } 
+                else {
+                    s.state = STATE_TEXT; 
+                }
+                break;
+
+            case STATE_CSI:
+                // Drop sequences starting with '?' (private modes / alt-screen)
+                if (write_idx - seq_start_idx == 3 && c == '?') {
+                    s.drop_sequence = true;
+                }
+
+                // Integer parameter parsing
+                if (c >= '0' && c <= '9') {
+                    s.current_param = (s.current_param * 10) + (c - '0');
+                } 
+                else if (c == ';') {
+                    // Check for strict truecolor/256-color patterns: 38;5, 48;5, 38;2, etc.
+                    if ((s.prev_param == 38 || s.prev_param == 48 || s.prev_param == 58) && 
+                        (s.current_param == 5 || s.current_param == 2)) {
+                        s.is_extended_color = true;
+                    }
+                    s.prev_param = s.current_param;
+                    s.current_param = 0;
+                }
+
+                // Sequence Termination (any letter 0x40 to 0x7E)
+                if (c >= 0x40 && c <= 0x7E) {
+                    // ONLY drop extended color codes if they terminate as graphic renditions ('m')
+                    if (c == 'm' && s.is_extended_color) {
+                        s.drop_sequence = true;
+                    }
+
+                    if (s.drop_sequence) {
+                        write_idx = seq_start_idx; // SQUEEZE
+                    }
+                    s.state = STATE_TEXT;
+                }
+                break;
+
+            case STATE_SKIP_OSC:
+                if (c == 0x07) { 
+                    write_idx = seq_start_idx;
+                    s.state = STATE_TEXT;
+                } 
+                else if (c == 0x1B) { 
+                    write_idx = seq_start_idx;
+                    buffer[write_idx++] = 0x1B; 
+                    seq_start_idx = write_idx - 1;
+                    s.state = STATE_ESC;
+                    s.drop_sequence = false;
+                }
+                break;
+        }
+    }
+
+    // Handle incomplete sequences at the chunk boundary
+    if (s.state != STATE_TEXT) {
+        s.carry_len = write_idx - seq_start_idx;
+        
+        if (s.carry_len <= sizeof(s.carryover)) {
+            memcpy(s.carryover, buffer + seq_start_idx, s.carry_len);
+        } else {
+            s.carry_len = 0; 
+        }
+        
+        write_idx = seq_start_idx;
+        s.state = STATE_TEXT; 
+    }
+
+    *length = write_idx;
+}
+
+static void initKnownHostsFile() {
+    if (!FFat.exists(SSH_KNOWN_HOSTS_FILE)) {
+        File f = FFat.open(SSH_KNOWN_HOSTS_FILE, "w");
+        if (f) f.close();
+    }
+}
+
+static bool isHostKnown(const uint8_t* hash) {
+    File f = FFat.open(SSH_KNOWN_HOSTS_FILE, "r");
+    if (!f) return false;
+    uint8_t stored[SSH_KNOWN_HOST_HASH_SIZE];
+    while (f.read(stored, sizeof(stored)) == sizeof(stored)) {
+        if (memcmp(stored, hash, sizeof(stored)) == 0) {
+            f.close();
+            return true;
+        }
+    }
+    f.close();
+    return false;
+}
+
+static bool addHostToKnown(const uint8_t* hash) {
+    File f = FFat.open(SSH_KNOWN_HOSTS_FILE, "a");
+    if (!f) return false;
+    size_t w = f.write(hash, SSH_KNOWN_HOST_HASH_SIZE);
+    f.close();
+    return w == SSH_KNOWN_HOST_HASH_SIZE;
+}
 
 static byte sshOpen(byte *params, unsigned int paramLen, byte *outConnNum) {
   if (paramLen < 8) return UNAPI_ERR_INV_PARAM;
@@ -971,22 +1164,41 @@ static byte sshOpen(byte *params, unsigned int paramLen, byte *outConnNum) {
   byte subsystem = params[6];
   if ((subsystem != SSH_SUB_PTY) && (subsystem != SSH_SUB_RAW))
     return UNAPI_ERR_NOT_IMP;
-  // Flags: bit 0 = auth method (0=password, 1=public key), bits 1-7 unused
+  // Flags:
+  // bit 0: auth method (0=password, 1=public key). Ignored when bit 2 is set.
+  // bit 1: Anonymous Authentication. Cannot be combined with bit 2.
+  // bit 2: Keyboard-Interactive Authentication
+  // bit 3: Non ANSI filter
+  // bit 4: Host key verification (returns SSH_ERR_UNKNOWN_HOST + hash if unknown)
+  // bits 5-7: Unused, must be zero
   byte flags = params[7];
-  if (flags > 3)
+  if (flags > 0x1f)
     return UNAPI_ERR_INV_PARAM;
+  if (((flags & 0x06) == 0x06) || ((flags & 0x03) == 0x03))
+    return UNAPI_ERR_INV_PARAM; // bit 1 can't be set when bit 0 or bit 2 is set
   bool usePubKey = (flags & 0x01) != 0;
   bool anonymousConnection = (flags & 0x02) != 0;
+  bool useKbdInt = (flags & 0x04) != 0;
+  bool bFilter = (flags & 0x08) != 0;
+  bool verifyHostKey = (flags & 0x10) != 0;
+
+  if (bFilter && subsystem != SSH_SUB_PTY)
+    return UNAPI_ERR_INV_PARAM;
 
   unsigned int userOff = 8;
   unsigned int userLen = 0;
-  unsigned int authOff = userOff + userLen + 1;
+  unsigned int authOff;
   unsigned int authLen = 0;
-  if (!anonymousConnection) {
-    // Parse username (null-terminated, starts at offset 7)
+
+  if (useKbdInt) {
+    // Keyboard-interactive: only username is needed, no auth data
     while (userOff + userLen < paramLen && params[userOff + userLen] != 0) userLen++;
     if (userLen == 0 || userOff + userLen >= paramLen) return UNAPI_ERR_INV_PARAM;
-
+  } else if (!anonymousConnection) {
+    // Password or public key: username + auth data required
+    while (userOff + userLen < paramLen && params[userOff + userLen] != 0) userLen++;
+    if (userLen == 0 || userOff + userLen >= paramLen) return UNAPI_ERR_INV_PARAM;
+    authOff = userOff + userLen + 1;
     // Parse auth data (after username null)
     while (authOff + authLen < paramLen && params[authOff + authLen] != 0) authLen++;
     if (authLen == 0) return UNAPI_ERR_INV_PARAM;
@@ -998,6 +1210,7 @@ static byte sshOpen(byte *params, unsigned int paramLen, byte *outConnNum) {
     if (btConnections[slot] == CONN_CLOSED) break;
   if (slot == 4) return UNAPI_ERR_NO_FREE_CONN;
 
+  btSSHFilter[slot] = bFilter;
   // Create SSH session
   ssh_session session = ssh_new();
   if (session == NULL) return SSH_ERR_NO_RSS;
@@ -1013,6 +1226,62 @@ static byte sshOpen(byte *params, unsigned int paramLen, byte *outConnNum) {
   if (ssh_connect(session) != SSH_OK) {
     ssh_free(session);
     return UNAPI_ERR_NO_CONN;
+  }
+
+  // Host key verification (bit 4)
+  if (verifyHostKey) {
+    ssh_key key = NULL;
+    unsigned char *hash = NULL;
+    size_t hlen;
+    if (ssh_get_server_publickey(session, &key) == SSH_OK) {
+      if (ssh_get_publickey_hash(key, SSH_PUBLICKEY_HASH_SHA256, &hash, &hlen) == SSH_OK && hlen == SSH_KNOWN_HOST_HASH_SIZE) {
+        if (!isHostKnown(hash)) {
+          // Save credentials for SSH_ADD_KNOWN_HOST resume
+          if (useKbdInt) {
+            sshPendingAuthType[slot] = 2;
+            strncpy(sshPendingUser[slot], (const char*)&params[userOff], SSH_CRED_USER_MAX - 1);
+            sshPendingUser[slot][SSH_CRED_USER_MAX - 1] = '\0';
+            sshPendingSecretLen[slot] = 0;
+          } else if (!anonymousConnection) {
+            sshPendingAuthType[slot] = usePubKey ? 1 : 0;
+            strncpy(sshPendingUser[slot], (const char*)&params[userOff], SSH_CRED_USER_MAX - 1);
+            sshPendingUser[slot][SSH_CRED_USER_MAX - 1] = '\0';
+            unsigned int authDataLen = authLen < SSH_CRED_SECRET_MAX ? authLen : SSH_CRED_SECRET_MAX - 1;
+            memcpy(sshPendingSecret[slot], &params[authOff], authDataLen);
+            sshPendingSecret[slot][authDataLen] = '\0';
+            sshPendingSecretLen[slot] = authDataLen;
+          } else {
+            sshPendingAuthType[slot] = 3;
+            sshPendingUser[slot][0] = '\0';
+            sshPendingSecretLen[slot] = 0;
+          }
+          sshPendingValid[slot] = true;
+          memcpy(sshPendingHash[slot], hash, SSH_KNOWN_HOST_HASH_SIZE);
+          sshPendingHashValid[slot] = true;
+          sshSessions[slot] = session;
+          sshSubsystems[slot] = subsystem;
+          btConnections[slot] = CONN_SSH;
+          *outConnNum = slot + 1;
+          ssh_clean_pubkey_hash(&hash);
+          ssh_key_free(key);
+          return SSH_ERR_UNKNOWN_HOST;
+        }
+        ssh_clean_pubkey_hash(&hash);
+      }
+      ssh_key_free(key);
+    }
+  }
+
+  if (useKbdInt) {
+    // Keyboard-interactive: defer authentication, store session as-is
+    sshSessions[slot] = session;
+    sshChannels[slot] = NULL;
+    sshSubsystems[slot] = subsystem;
+    btConnections[slot] = CONN_SSH;
+    sshKbdIntActive[slot] = true;
+    sshChallengeDataLen[slot] = 0;
+    *outConnNum = slot + 1;
+    return UNAPI_ERR_OK;
   }
 
   // Authenticate
@@ -1069,7 +1338,14 @@ static byte sshOpen(byte *params, unsigned int paramLen, byte *outConnNum) {
       case TERM_ANSI: termStr = "ansi"; break;
       default: termStr = "xterm"; break;
     }
-    ssh_channel_request_pty_size(channel, termStr, sshWinCol, sshWinRow);
+    if (ssh_channel_request_pty_size(channel, termStr, sshWinCol, sshWinRow) != SSH_OK) {
+      ssh_channel_close(channel);
+      ssh_channel_free(channel);
+      ssh_disconnect(session);
+      ssh_free(session);
+      return SSH_ERR_PTY_REQ;
+
+    }
     if (ssh_channel_request_shell(channel) != SSH_OK) {
       ssh_channel_close(channel);
       ssh_channel_free(channel);
@@ -1082,9 +1358,104 @@ static byte sshOpen(byte *params, unsigned int paramLen, byte *outConnNum) {
   // Store
   sshSessions[slot] = session;
   sshChannels[slot] = channel;
+  sshSubsystems[slot] = subsystem;
   btConnections[slot] = CONN_SSH;
   *outConnNum = slot + 1;
   return UNAPI_ERR_OK;
+}
+
+static byte sshAddKnownHost(byte connNum) {
+  if (connNum < 1 || connNum > 4) return UNAPI_ERR_NO_CONN;
+  byte slot = connNum - 1;
+  if (!sshPendingHashValid[slot]) return UNAPI_ERR_NO_CONN;
+
+  if (!addHostToKnown(sshPendingHash[slot])) {
+    return SSH_ERR_NO_RSS;
+  }
+  sshPendingHashValid[slot] = false;
+
+  ssh_session session = sshSessions[slot];
+  if (session == NULL) {
+    btConnections[slot] = CONN_CLOSED;
+    sshPendingValid[slot] = false;
+    return UNAPI_ERR_NO_CONN;
+  }
+
+  byte subsystem = sshSubsystems[slot];
+  byte authType = sshPendingAuthType[slot];
+  ssh_channel channel = NULL;
+
+  if (authType == 2) {
+    sshKbdIntActive[slot] = true;
+    sshChallengeDataLen[slot] = 0;
+    sshChannels[slot] = NULL;
+    sshPendingValid[slot] = false;
+    return UNAPI_ERR_OK;
+  }
+
+  if (authType == 1) {
+    ssh_key pvtkey = NULL;
+    int rc = ssh_pki_import_privkey_base64(
+      (const char*)sshPendingSecret[slot], NULL, NULL, NULL, &pvtkey);
+    if (rc != SSH_OK) {
+      goto fail_cleanup;
+    }
+    rc = ssh_userauth_publickey(session, NULL, pvtkey);
+    ssh_key_free(pvtkey);
+    if (rc != SSH_AUTH_SUCCESS) {
+      goto fail_cleanup;
+    }
+  } else if (authType == 0) {
+    if (ssh_userauth_password(session, NULL, (const char*)sshPendingSecret[slot]) != SSH_AUTH_SUCCESS) {
+      goto fail_cleanup;
+    }
+  } else if (authType == 3) {
+    if (ssh_userauth_none(session, "") != SSH_AUTH_SUCCESS) {
+      goto fail_cleanup;
+    }
+  }
+
+  // Open channel
+  channel = ssh_channel_new(session);
+  if (channel == NULL) {
+    goto fail_cleanup;
+  }
+  if (ssh_channel_open_session(channel) != SSH_OK) {
+    ssh_channel_free(channel);
+    goto fail_cleanup;
+  }
+
+  if (subsystem == SSH_SUB_PTY) {
+    const char *termStr;
+    switch (sshTermType) {
+      case TERM_VT52: termStr = "vt52"; break;
+      case TERM_ANSI: termStr = "ansi"; break;
+      default: termStr = "xterm"; break;
+    }
+    if (ssh_channel_request_pty_size(channel, termStr, sshWinCol, sshWinRow) != SSH_OK) {
+      ssh_channel_close(channel);
+      ssh_channel_free(channel);
+      goto fail_cleanup;
+    }
+    if (ssh_channel_request_shell(channel) != SSH_OK) {
+      ssh_channel_close(channel);
+      ssh_channel_free(channel);
+      goto fail_cleanup;
+    }
+  }
+
+  sshChannels[slot] = channel;
+  sshPendingValid[slot] = false;
+  return UNAPI_ERR_OK;
+
+fail_cleanup:
+  ssh_disconnect(session);
+  ssh_free(session);
+  sshSessions[slot] = NULL;
+  sshChannels[slot] = NULL;
+  btConnections[slot] = CONN_CLOSED;
+  sshPendingValid[slot] = false;
+  return UNAPI_ERR_NO_CONN;
 }
 
 static byte sshClose(byte connNum) {
@@ -1102,6 +1473,11 @@ static byte sshClose(byte connNum) {
     ssh_free(sshSessions[slot]);
     sshSessions[slot] = NULL;
   }
+  sshKbdIntActive[slot] = false;
+  sshSubsystems[slot] = 0;
+  sshChallengeDataLen[slot] = 0;
+  sshPendingHashValid[slot] = false;
+  sshPendingValid[slot] = false;
   btConnections[slot] = CONN_CLOSED;
   return UNAPI_ERR_OK;
 }
@@ -1111,6 +1487,20 @@ static byte sshState(byte connNum, uint8_t *state, uint16_t *avail) {
   byte slot = connNum - 1;
   if (btConnections[slot] != CONN_SSH || sshSessions[slot] == NULL) {
     *state = SSH_CLOSED;
+    return UNAPI_ERR_OK;
+  }
+
+  // Check for HostUnknown state (pending host key approval)
+  if (sshPendingHashValid[slot]) {
+    *state = SSH_HOST_UNKNOWN;
+    *avail = 0;
+    return UNAPI_ERR_OK;
+  }
+
+  // Check for keyboard-interactive auth in progress
+  if (sshKbdIntActive[slot]) {
+    *state = SSH_AUTH_CHALLENGE;
+    *avail = (uint16_t)sshChallengeDataLen[slot];
     return UNAPI_ERR_OK;
   }
 
@@ -1151,6 +1541,8 @@ static byte sshReceive(byte connNum, byte *buf, uint16_t maxSize, uint16_t *outL
   int n = ssh_channel_read_nonblocking(sshChannels[slot], buf, maxSize, 0);
   if (n == SSH_ERROR) return UNAPI_ERR_CONN_STATE;
   if (n == 0) return UNAPI_ERR_NO_DATA;
+  if (btSSHFilter[slot])
+    filter_ssh_buffer_inplace(connNum, buf, &n);
   *outLen = (uint16_t)n;
   return UNAPI_ERR_OK;
 }
@@ -1166,6 +1558,180 @@ static byte sshSetWinSize(byte rows, byte cols) {
   sshWinRow = rows;
   sshWinCol = cols;
   return UNAPI_ERR_OK;
+}
+
+static byte sshAuthGetChallenge(byte connNum, byte *buf, unsigned int bufSize,
+                                byte *outPrompts, byte *outEchoFlags, unsigned int *outLen)
+{
+  if (connNum < 1 || connNum > 4) return UNAPI_ERR_NO_CONN;
+  byte slot = connNum - 1;
+  if (btConnections[slot] != CONN_SSH || sshSessions[slot] == NULL)
+    return UNAPI_ERR_NO_CONN;
+  if (!sshKbdIntActive[slot]) return UNAPI_ERR_CONN_STATE;
+
+  // If challenge data is not yet cached, fetch it from libssh
+  if (sshChallengeDataLen[slot] == 0) {
+    int rc = ssh_userauth_kbdint(sshSessions[slot], NULL, NULL);
+    if (rc == SSH_AUTH_SUCCESS) {
+        // Auth succeeded: open channel and set up subsystem
+        ssh_channel channel = ssh_channel_new(sshSessions[slot]);
+        if (channel == NULL) {
+          sshKbdIntActive[slot] = false;
+          return SSH_ERR_NO_RSS;
+        }
+        if (ssh_channel_open_session(channel) != SSH_OK) {
+          ssh_channel_free(channel);
+          sshKbdIntActive[slot] = false;
+          return UNAPI_ERR_NO_CONN;
+        }
+
+        if (sshSubsystems[slot] == SSH_SUB_PTY) {
+          const char *termStr;
+          switch (sshTermType) {
+            case TERM_VT52: termStr = "vt52"; break;
+            case TERM_ANSI: termStr = "ansi"; break;
+            default: termStr = "xterm"; break;
+          }
+          ssh_channel_request_pty_size(channel, termStr, sshWinCol, sshWinRow);
+          if (ssh_channel_request_shell(channel) != SSH_OK) {
+            ssh_channel_close(channel);
+            ssh_channel_free(channel);
+            sshKbdIntActive[slot] = false;
+            return SSH_ERR_PTY_REQ;
+          }
+          // Force a window size update to "wake up" the shell
+          ssh_channel_change_pty_size(channel, sshWinCol, sshWinRow);
+        }
+
+        sshChannels[slot] = channel;
+        sshKbdIntActive[slot] = false;
+        return UNAPI_ERR_OK;
+    }
+    else if (rc == SSH_AUTH_DENIED) {
+      return SSH_ERR_AUTH_TRY_OTHER;
+    }    
+    else if (rc != SSH_AUTH_INFO) {
+      return UNAPI_ERR_CONN_STATE;
+    }
+
+    const char *name = ssh_userauth_kbdint_getname(sshSessions[slot]);
+    const char *instruction = ssh_userauth_kbdint_getinstruction(sshSessions[slot]);
+    int numPrompts = ssh_userauth_kbdint_getnprompts(sshSessions[slot]);
+    if (name == NULL) name = "";
+    if (instruction == NULL) instruction = "";
+
+    unsigned int pos = 0;
+    byte echoFlags = 0;
+
+    // Write name, instruction, prompts into cache
+    auto writeStr = [&](const char *s) {
+      unsigned int slen = strlen(s) + 1;
+      if (pos + slen <= SSH_CHALLENGE_BUF_SIZE) {
+        memcpy(sshChallengeData[slot] + pos, s, slen);
+        pos += slen;
+      }
+    };
+
+    writeStr(name);
+    writeStr(instruction);
+    for (int i = 0; i < numPrompts; i++) {
+      char echo = 0;
+      const char *prompt = ssh_userauth_kbdint_getprompt(sshSessions[slot], i, &echo);
+      if (prompt == NULL) prompt = "";
+      writeStr(prompt);
+      if (echo) echoFlags |= (1 << i);
+    }
+    // Final terminator
+    if (pos < SSH_CHALLENGE_BUF_SIZE) sshChallengeData[slot][pos] = 0;
+    pos++;
+
+    sshChallengeDataLen[slot] = pos;
+    sshChallengePrompts[slot] = (byte)numPrompts;
+    sshChallengeEchoFlags[slot] = echoFlags;
+  }
+
+  // Serve from cache
+  unsigned int needed = sshChallengeDataLen[slot];
+  if (needed > bufSize) {
+    *outLen = needed;
+    return UNAPI_ERR_BUFFER;
+  }
+
+  memcpy(buf, sshChallengeData[slot], needed);
+  *outPrompts = sshChallengePrompts[slot];
+  *outEchoFlags = sshChallengeEchoFlags[slot];
+  *outLen = needed;
+  return UNAPI_ERR_OK;
+}
+
+static byte sshAuthRespond(byte connNum, byte *responseBlock, unsigned int respLen)
+{
+  if (connNum < 1 || connNum > 4) return UNAPI_ERR_NO_CONN;
+  byte slot = connNum - 1;
+  if (btConnections[slot] != CONN_SSH || sshSessions[slot] == NULL)
+    return UNAPI_ERR_NO_CONN;
+  if (!sshKbdIntActive[slot]) return UNAPI_ERR_CONN_STATE;
+
+  // Parse response block: count byte followed by zero-terminated strings
+  byte count = responseBlock[0];
+  if (count == 0 || count != sshChallengePrompts[slot]) return UNAPI_ERR_INV_PARAM;
+
+  unsigned int off = 1;
+  for (byte i = 0; i < count; i++) {
+    if (off >= respLen) return UNAPI_ERR_INV_PARAM;
+    const char *answer = (const char *)(responseBlock + off);
+    ssh_userauth_kbdint_setanswer(sshSessions[slot], i, answer);
+    off += strlen(answer) + 1;
+  }
+
+  // Clear cached challenge data
+  sshChallengeDataLen[slot] = 0;
+
+  // Submit answers
+  int rc = ssh_userauth_kbdint(sshSessions[slot], NULL, NULL);
+
+  if (rc == SSH_AUTH_SUCCESS) {
+    // Auth succeeded: open channel and set up subsystem
+    ssh_channel channel = ssh_channel_new(sshSessions[slot]);
+    if (channel == NULL) {
+      sshKbdIntActive[slot] = false;
+      return SSH_ERR_NO_RSS;
+    }
+    if (ssh_channel_open_session(channel) != SSH_OK) {
+      ssh_channel_free(channel);
+      sshKbdIntActive[slot] = false;
+      return UNAPI_ERR_NO_CONN;
+    }
+
+    if (sshSubsystems[slot] == SSH_SUB_PTY) {
+      const char *termStr;
+      switch (sshTermType) {
+        case TERM_VT52: termStr = "vt52"; break;
+        case TERM_ANSI: termStr = "ansi"; break;
+        default: termStr = "xterm"; break;
+      }
+      ssh_channel_request_pty_size(channel, termStr, sshWinCol, sshWinRow);
+      if (ssh_channel_request_shell(channel) != SSH_OK) {
+        ssh_channel_close(channel);
+        ssh_channel_free(channel);
+        sshKbdIntActive[slot] = false;
+        return SSH_ERR_PTY_REQ;
+      }
+    }
+
+    sshChannels[slot] = channel;
+    sshKbdIntActive[slot] = false;
+    return UNAPI_ERR_OK;
+  }
+
+  if (rc == SSH_AUTH_INFO) {
+    // Another challenge available, will be cached on next GET_CHALLENGE
+    return UNAPI_ERR_OK;
+  }
+
+  // SSH_AUTH_DENIED, SSH_AUTH_ERROR, SSH_AUTH_PARTIAL, etc.
+  sshKbdIntActive[slot] = false;
+  return SSH_ERR_PWD;
 }
 
 
@@ -1535,7 +2101,10 @@ void received_data_parser () {
           case SSH_RCV:
           case SSH_TERM_TYPE:
           case SSH_WIN_SIZE:
-             btState = RX_PARSER_WAIT_DATA_SIZE;
+           case SSH_AUTH_GET_CHALLENGE:
+           case SSH_AUTH_RESPOND:
+           case SSH_ADD_KNOWN_HOST:
+              btState = RX_PARSER_WAIT_DATA_SIZE;
              btCmdInternalStep = 0;
              break;
           default:
@@ -1973,17 +2542,22 @@ proccesscmd:
             Serial.write(btCommand);
             Serial.write(UNAPI_ERR_OK);
             Serial.write(0);
-            Serial.write(4);
+            Serial.write(6);
             // Capability flags ENABLED:
             // 0 - PTY
             // 3 - RAW
             // 8 - Built-in TCP/IP
             // 9 - Connection pool shared with built-in TCP/IP
             // 10 - Support Public Key Authentication
+            // 11 - Support Keyboard-Interactive Authentication
+            // 12 - Support non ANSI code filtering on PTY
+            // 13 - Host key verification (SSH_ADD_KNOWN_HOST)
             Serial.write(B00001001); //flags LSB
-            Serial.write(B00000111); //flags MSB
+            Serial.write(B00111111); //flags MSB (bit 13 = host key verification)
             Serial.write(4); //Max 4 simultaneous SSH conns
             Serial.write(4 - checkOpenConnections()); //Free SSH conns
+            Serial.write(0x00); //DE LSB = 2048 max data per call
+            Serial.write(0x08); //DE MSB = 2048
           }
         break;
         case TCPIP_GET_CAPAB:
@@ -2810,8 +3384,17 @@ proccesscmd:
           byte connNum;
           byte result = sshOpen(btCommandData, uiCmdDataLen, &connNum);
           if (result == UNAPI_ERR_OK) {
+            filter_ssh_buffer_inplace(connNum, NULL, NULL, true);
             btCommandData[0] = connNum;
             SendResponse(btCommand, result, 1, btCommandData);
+          } else if (result == SSH_ERR_UNKNOWN_HOST) {
+            btCommandData[0] = connNum;
+            byte slot = connNum - 1;
+            String encodedHash = base64::encode(sshPendingHash[slot], SSH_KNOWN_HOST_HASH_SIZE);
+            memcpy(btCommandData + 1, encodedHash.c_str(), encodedHash.length());
+            // don't want to send the padding
+            btCommandData[encodedHash.length()] = 0x00;
+            SendResponse(btCommand, result, encodedHash.length() + 1, btCommandData);
           } else {
             SendResponse(btCommand, result, 0, 0);
           }
@@ -2928,6 +3511,64 @@ proccesscmd:
             } else {
               SendResponse(btCommand, UNAPI_ERR_INV_PARAM, 0, 0);
             }
+          }
+        }
+        break;
+
+        case SSH_AUTH_GET_CHALLENGE:
+        {
+          if (uiCmdDataLen < 1) {
+            SendResponse(btCommand, UNAPI_ERR_INV_PARAM, 0, 0);
+          } else {
+            byte prompts, echoFlags;
+            unsigned int chalLen;
+            // btCommandData[0] = conn number
+            // Reserve 2 bytes for response header (prompts, echoFlags)
+            byte result = sshAuthGetChallenge(
+                btCommandData[0], btCommandData + 2, MAX_CMD_DATA_LEN - 2,
+                &prompts, &echoFlags, &chalLen);
+            if (result == UNAPI_ERR_OK) {
+              btCommandData[0] = prompts;
+              btCommandData[1] = echoFlags;
+              SendResponse(btCommand, result, chalLen + 2, btCommandData);
+            } else if (result == UNAPI_ERR_BUFFER) {
+              btCommandData[0] = 0; // reserved
+              btCommandData[1] = 0; // reserved
+              btCommandData[2] = (byte)(chalLen & 0xFF);       // required size LSB
+              btCommandData[3] = (byte)((chalLen >> 8) & 0xFF); // required size MSB
+              SendResponse(btCommand, result, 4, btCommandData);
+            } else if (result == SSH_ERR_AUTH_TRY_OTHER) {
+              sshClose(btCommandData[0]);
+              SendResponse(btCommand, result, 0, 0);
+            } 
+            else {
+              SendResponse(btCommand, result, 0, 0);
+            }
+          }
+        }
+        break;
+
+        case SSH_AUTH_RESPOND:
+        {
+          if (uiCmdDataLen < 2) {
+            SendResponse(btCommand, UNAPI_ERR_INV_PARAM, 0, 0);
+          } else {
+            // btCommandData[0] = conn number
+            // btCommandData[1..] = response block
+            byte result = sshAuthRespond(
+                btCommandData[0], btCommandData + 1, uiCmdDataLen - 1);
+            SendResponse(btCommand, result, 0, 0);
+          }
+        }
+        break;
+
+        case SSH_ADD_KNOWN_HOST:
+        {
+          if (uiCmdDataLen < 1) {
+            SendResponse(btCommand, UNAPI_ERR_INV_PARAM, 0, 0);
+          } else {
+            byte result = sshAddKnownHost(btCommandData[0]);
+            SendResponse(btCommand, result, 0, 0);
           }
         }
         break;

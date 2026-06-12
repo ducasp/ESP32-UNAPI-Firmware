@@ -73,15 +73,18 @@ Copyright (c) 2019 - 2026 Oduvaldo Pavan Junior ( ducasp@ gmail.com ) All rights
       28. [TCPIP_CONFIG_TTL](#cucfgttl)
       29. [TCPIP_CONFIG_PING](#cucfgping)
        30. [TCPIP_WAIT](#cuwait)
-    3. [SSH Commands](#usshcommands)
-      1. [SSH_GET_CAPAB](#cusshgetcapab)
-      2. [SSH_OPEN](#cusshopen)
-      3. [SSH_CLOSE](#cusshclose)
-      4. [SSH_STATE](#cusshstate)
-      5. [SSH_SEND](#cusshsend)
-      6. [SSH_RCV](#cusshrcv)
-      7. [SSH_TERM_TYPE](#cusshtermtype)
-      8. [SSH_WIN_SIZE](#cusshwinsize)
+     3. [SSH Commands](#usshcommands)
+       1. [SSH_GET_CAPAB](#cusshgetcapab)
+       2. [SSH_OPEN](#cusshopen)
+       3. [SSH_CLOSE](#cusshclose)
+       4. [SSH_STATE](#cusshstate)
+       5. [SSH_SEND](#cusshsend)
+       6. [SSH_RCV](#cusshrcv)
+       7. [SSH_TERM_TYPE](#cusshtermtype)
+       8. [SSH_WIN_SIZE](#cusshwinsize)
+        9. [SSH_AUTH_GET_CHALLENGE](#cusshauthgetchallenge)
+        10. [SSH_AUTH_RESPOND](#cusshauthrespond)
+        11. [SSH_ADD_KNOWN_HOST](#cusshaddknownhost)
 
 
 ## <a name="goals"></a> Introduction / Design Choices - Goals
@@ -1512,15 +1515,16 @@ Information to be retrieved:
 
 *Response Structure for Index 1:*
 
-| Position | Function                 | Value                                                                           |
-|:--------:| ------------------------ | ------------------------------------------------------------------------------- |
-| 0        | CMD_BYTE                 | 81                                                                              |
-| 1        | Error Code               | 0 - Ok<br/>4 - Invalid parameters: not enough input data or values out of range |
-| 2 - 3    | Response Size            | 16 bits value (MSB LSB) indicating the size of the response                     |
-|          |                          | This part of response only exists if error code is 0                            |
-| 4 - 5    | Capabilities Flags       | 16 bits value (LSB MSB)                                                         |
-| 6        | Max. Connections         | 1 byte value                                                                    |
-| 7        | Free Connections         | 1 byte value                                                                    |
+| Position | Function                          | Value                                                                           |
+|:--------:| --------------------------------- | ------------------------------------------------------------------------------- |
+| 0        | CMD_BYTE                          | 81                                                                              |
+| 1        | Error Code                        | 0 - Ok<br/>4 - Invalid parameters: not enough input data or values out of range |
+| 2 - 3    | Response Size                     | 16 bits value (MSB LSB) indicating the size of the response                     |
+|          |                                   | This part of response only exists if error code is 0                            |
+| 4 - 5    | Capabilities Flags                | 16 bits value (LSB MSB).                                                        |
+| 6        | Max. Connections                  | 1 byte value                                                                    |
+| 7        | Free Connections                  | 1 byte value                                                                    |
+| 8 - 9    | Max data per SSH_SEND/SSH_RCV     | 16 bits value (LSB MSB)                                                         |
 
 #### <a name="cusshopen"></a> SSH_OPEN
 
@@ -1538,8 +1542,12 @@ This command will open a new SSH client connection and authenticate to the remot
 | X+1 - Y  | Authentication Data  | Zero terminated string (password or private key PEM data)   |
 
 Flags byte:
-- Bit 0: Authentication method (0 = password, 1 = public key)
-- Bits 1-7: Unused, must be zero
+- Bit 0: Authentication method (0 = password, 1 = public key). Ignored when bit 2 is set.
+- Bit 1: Anonymous Authentication. Cannot be combined with bit 2.
+- Bit 2: Keyboard-Interactive Authentication
+- Bit 3: Non ANSI filter enable (PTY only)
+- Bit 4: Host key verification. When set, the remote server's host key is checked against the known hosts list. If unknown, error 132 is returned with the SHA-256 fingerprint.
+- Bits 5-7: Unused, must be zero
 
 *Command Structure:*
 
@@ -1554,10 +1562,11 @@ Flags byte:
 | Position | Function          | Value                                                                                                                                                                                                                                                                                 |
 |:--------:| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0        | CMD_BYTE          | 82                                                                                                                                                                                                                                                                                    |
-| 1        | Error Code        | 0 - Ok<br/>1 - Not implemented (SSH client not supported)<br/>2 - Not connected to the network<br/>4 - Invalid parameters: not enough input data or invalid values<br/>9 - No free connections available, close one and try again<br/>11 - Connection could not be established or authentication failed<br/>127 - Not enough memory to create a new session<br/>128 - The key used as password is invalid format<br/>129 - The key or password used to authenticate session was not accepted<br/>130 - An error occurred while requesting a shell for PTY |
-| 2 - 3    | Response Size     | 16 bits value (MSB LSB) indicating the size of the response                                                                                                                                                                                                                           |
-|          |                   | This part of response only exists if error code is 0                                                                                                                                                                                                                                  |
-| 4        | Connection Number | 1 byte value                                                                                                                                                                                                                                                                          |
+| 1        | Error Code        | 0 - Ok<br/>1 - Not implemented (SSH client not supported)<br/>2 - Not connected to the network<br/>4 - Invalid parameters: not enough input data or invalid values<br/>9 - No free connections available, close one and try again<br/>11 - Connection could not be established or authentication failed<br/>127 - Not enough memory to create a new session<br/>128 - The key used as password is invalid format<br/>129 - The key or password used to authenticate session was not accepted<br/>130 - An error occurred while requesting a shell for PTY<br/>131 - Remote server requires keyboard-interactive auth but a different method was requested<br/>132 - Remote server's host key is unknown (host key verification enabled, see response data for fingerprint) |
+| 2 - 3    | Response Size     | 16 bits value (MSB LSB) indicating the size of the response                                                                                                                                                                                                                          |
+|          |                   | This part of response only exists if error code is 0 or 132                                                                                                                                                                                                                          |
+| 4        | Connection Number | 1 byte value (only present if error code is 0 or 132)                                                                                                                                                                                                                                |
+| 5 - 36   | Host FingerPrint  | Base64 encoded SHA-256 of the remote server's public key (only present if error code is 132)                                                                                                                                                                                         |
 
 #### <a name="cusshclose"></a> TCPIP_SSH_CLOSE
 
@@ -1611,7 +1620,7 @@ This command will retrieve the state of an existing SSH connection.
 | 1        | Error Code                      | 0 - Ok<br/>1 - Not implemented<br/>4 - Invalid parameters: not enough input data<br/>11 - Connection number is not open or is not an SSH connection |
 | 2 - 3    | Response Size                   | 16 bits value (MSB LSB) indicating the size of the response                                                                |
 |          |                                 | This part of response only exists if error code is 0                                                                       |
-| 4        | Connection state                | 1 byte value (0=Closed, 1=Connecting, 2=Authenticating, 3=Connected, 4=Error)                                              |
+| 4        | Connection state                | 1 byte value (0=Closed, 1=Connecting, 2=Authenticating, 3=Connected, 4=Error, 5=AuthChallenge, 6=HostUnknown)               |
 | 5 - 6    | Total available incoming bytes  | 16 bits value (LSB MSB)                                                                                                    |
 
 #### <a name="cusshsend"></a> TCPIP_SSH_SEND
@@ -1774,5 +1783,92 @@ Default window size (when not explicitly set) is 24 rows × 40 columns.
 | 0        | CMD_BYTE      | 88                                                                                                                     |
 | 1        | Error Code    | 0 - Ok (SET)<br/>1 - Not implemented<br/>4 - Invalid parameters: not enough input data or invalid GET/SET or rows/cols values<br/>11 - Connection number is not open or is not an SSH connection |
 | 2 - 3    | Response Size | 16 bits value (MSB LSB) indicating the size of the response: always 0x0000                                             |
+
+#### <a name="cusshauthgetchallenge"></a> SSH_AUTH_GET_CHALLENGE
+
+This command will retrieve the current keyboard-interactive authentication challenge from the remote server.
+
+*Input Parameters:*
+
+| Position | Function          | Value        |
+|:--------:| ----------------- | ------------ |
+| 0        | Connection Number | 1 byte value |
+
+*Command Structure:*
+
+| Position | Function          | Value                                                               |
+|:--------:| ----------------- | ------------------------------------------------------------------- |
+| 0        | CMD_BYTE          | 89                                                                  |
+| 1 - 2    | INPUT_PARAMS_SIZE | 16 bits value (MSB LSB) indicating the size of the input parameters |
+| 3        | INPUT_PARAMS      | Connection Number                                                   |
+
+*Response Structure:*
+
+| Position | Function                          | Value                                                                                                                                                                       |
+|:--------:| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0        | CMD_BYTE                          | 89                                                                                                                                                                          |
+| 1        | Error Code                        | 0 - Ok<br/>1 - Not implemented<br/>11 - Connection number is not open or is not an SSH connection<br/>12 - Invalid connection state (not AuthChallenge)<br/>13 - Insufficient buffer space |
+| 2 - 3    | Response Size                     | 16 bits value (MSB LSB) indicating the size of the response                                                                                                                 |
+|          |                                   | This part of response only exists if error code is 0 or 13                                                                                                                  |
+| **When error code is 0 (Ok):**   |                                   |                                                                                                                                                                             |
+| 4        | Number of prompts                 | 1 byte value                                                                                                                                                                |
+| 5        | Echo flags                        | 1 byte value (bit N set = echo the response for prompt N)                                                                                                                   |
+| 6 - X    | Challenge data                    | Sequence of zero-terminated strings: Name\0Instruction\0Prompt1\0Prompt2\0\0                                                                                                |
+| **When error code is 13 (ERR_BUFFER):** |                                   |                                                                                                                                                                             |
+| 4 - 5    | Required buffer size              | 16 bits value (LSB MSB)                                                                                                                                                     |
+
+#### <a name="cusshauthrespond"></a> SSH_AUTH_RESPOND
+
+This command will send responses to the current keyboard-interactive authentication challenge.
+
+*Input Parameters:*
+
+| Position | Function                          | Value                                                       |
+|:--------:| --------------------------------- | ----------------------------------------------------------- |
+| 0        | Connection Number                 | 1 byte value                                                |
+| 1        | Number of responses               | 1 byte value                                                |
+| 2 - X    | Response strings                  | Sequence of zero-terminated strings: Resp1\0Resp2\0\0       |
+
+*Command Structure:*
+
+| Position | Function          | Value                                                               |
+|:--------:| ----------------- | ------------------------------------------------------------------- |
+| 0        | CMD_BYTE          | 8A                                                                  |
+| 1 - 2    | INPUT_PARAMS_SIZE | 16 bits value (MSB LSB) indicating the size of the input parameters |
+| 3 - X    | INPUT_PARAMS      | Input parameters                                                    |
+
+*Response Structure:*
+
+| Position | Function      | Value                                                                                                                                                                       |
+|:--------:| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0        | CMD_BYTE      | 8A                                                                                                                                                                          |
+| 1        | Error Code    | 0 - Ok<br/>1 - Not implemented<br/>4 - Invalid parameters: response count mismatch<br/>11 - Connection number is not open or is not an SSH connection<br/>12 - Invalid connection state (not AuthChallenge)<br/>129 - The password or response was not accepted |
+| 2 - 3    | Response Size | 16 bits value (MSB LSB) indicating the size of the response: always 0x0000                                                                                                  |
+
+#### <a name="cusshaddknownhost"></a> SSH_ADD_KNOWN_HOST
+
+This command accepts the remote server's host key that was found unknown during a prior SSH_OPEN call with flag bit 4 set, persists the host key to the known hosts list, and resumes the connection (authentication, channel open, and subsystem setup).
+
+*Input Parameters:*
+
+| Position | Function          | Value                                                       |
+|:--------:| ----------------- | ----------------------------------------------------------- |
+| 0        | Connection Number | 1 byte value (returned by SSH_OPEN when error 132 was produced) |
+
+*Command Structure:*
+
+| Position | Function          | Value                                                               |
+|:--------:| ----------------- | ------------------------------------------------------------------- |
+| 0        | CMD_BYTE          | 8B                                                                  |
+| 1 - 2    | INPUT_PARAMS_SIZE | 16 bits value (MSB LSB) indicating the size of the input parameters |
+| 3 - X    | INPUT_PARAMS      | Input parameters                                                    |
+
+*Response Structure:*
+
+| Position | Function      | Value                                                                                                                                                                 |
+|:--------:| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0        | CMD_BYTE      | 8B                                                                                                                                                                    |
+| 1        | Error Code    | 0 - Ok<br/>1 - Not implemented<br/>4 - Invalid parameters<br/>9 - No free connections<br/>11 - Connection number is not open or is not in HostUnknown state<br/>127 - Not enough memory<br/>128 - Invalid key format<br/>129 - Authentication failed<br/>130 - PTY request error |
+| 2 - 3    | Response Size | 16 bits value (MSB LSB) indicating the size of the response: always 0x0000                                                                                            |
 
 

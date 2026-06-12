@@ -64,18 +64,18 @@ This document describes an UNAPI compliant API intended for software that implem
 SSH protocol and subsystems, that is, software that provides a secure network protocol.
 The functionality provided by this API is focused mainly on communicating with other
 computers by using PTY subsystem. This specification might be expanded later to allow
-other subsystems like SFTP.
+other subsystems like SCP and SFTP.
 
 The intended client software applications for this API are networking related applications
-such as SSH terminal. This document is targeted at both developers of SSH UNAPI implementations,
-and developers of client applications for these implementations.
+such as SSH PTY terminal. This document is targeted at both developers of SSH UNAPI
+implementations, and developers of client applications for these implementations.
 
 ### 1.1. Design goals
 
 There were two main goals when designing this specification:
 
 - *Simplicity*. This specification's intent is to provide the simplest API that will allow
-to develop useful SSH applications for MSX computers.
+to develop useful SSH related applications for MSX computers.
 
 - *Modularity*. Most of the capabilities provided by this API are optional, and there
 are means to get information about which capabilities are supported by a given
@@ -90,7 +90,7 @@ capabilities required in order to develop SSH networking applications. These cap
 are:
 
 - Openning a SSH connections.
-- Communicating via PTY, SFTP, SCP subsystems.
+- Communicating via subsystems implemented.
 - RAW Communication without any subsystem.
 
 ### 1.3. Modularity
@@ -136,31 +136,31 @@ each one returned. Return codes are shared with TCP/IP UNAPI specification since
 network protocol on top of TCP/IP. Any future SSH specific error codes will use the range
 of 127 to 255.
 
-| Code | Mnemonic | Description |
-| --- | --- | --- |
-| 0 | ERR_OK | Operation completed successfully |
-| 1 | ERR_NOT_IMP | Capability not implemented |
-| 2 | ERR_NO_NETWORK | No network connection available |
-| 3 | ERR_NO_DATA | No incoming data available |
-| 4 | ERR_INV_PARAM | Invalid input parameter |
-| 6 | ERR_INV_IP | Invalid IP address |
-| 9 | ERR_NO_FREE_CONN | No free connections available |
-| 10 | ERR_CONN_EXISTS | Connection already exists |
-| 11 | ERR_NO_CONN | Connection does not exists |
-| 12 | ERR_CONN_STATE | Invalid connection state |
-| 13 | ERR_BUFFER | Insufficient output buffer space |
-| 15 | ERR_INV_OPER | Invalid operation |
-| 127 | SSH_ERR_NO_RSS | Not enough memory to create a new session |
-| 128 | SSH_ERR_INV_KEY | The key used as password is invalid format |
-| 129 | SSH_ERR_PWD | The key or password used to authenticate session was not accepted. |
-| 130 | SSH_ERR_PTY_REQ | An error occurred while requesting a shell for PTY |
-| 131 | SSH_ERR_AUTH_TRY_OTHER | The remote server denied the requested authentication mode |
-| 132 | SSH_ERR_UNKNOWN_HOST | The remote server's host key could not be verified against the known hosts list |
+| Code | Mnemonic               | Description                                                                     |
+| ---- | ---------------------- | ------------------------------------------------------------------------------- |
+| 0    | ERR_OK                 | Operation completed successfully                                                |
+| 1    | ERR_NOT_IMP            | Capability not implemented                                                      |
+| 2    | ERR_NO_NETWORK         | No network connection available                                                 |
+| 3    | ERR_NO_DATA            | No incoming data available                                                      |
+| 4    | ERR_INV_PARAM          | Invalid input parameter                                                         |
+| 6    | ERR_INV_IP             | Invalid IP address                                                              |
+| 9    | ERR_NO_FREE_CONN       | No free connections available                                                   |
+| 10   | ERR_CONN_EXISTS        | Connection already exists                                                       |
+| 11   | ERR_NO_CONN            | Connection does not exists                                                      |
+| 12   | ERR_CONN_STATE         | Invalid connection state                                                        |
+| 13   | ERR_BUFFER             | Insufficient output buffer space                                                |
+| 15   | ERR_INV_OPER           | Invalid operation                                                               |
+| 127  | SSH_ERR_NO_RSS         | Not enough memory to create a new session                                       |
+| 128  | SSH_ERR_INV_KEY        | The key used as password is invalid format                                      |
+| 129  | SSH_ERR_PWD            | The key or password used to authenticate session was not accepted.              |
+| 130  | SSH_ERR_PTY_REQ        | An error occurred while requesting a shell for PTY                              |
+| 131  | SSH_ERR_AUTH_TRY_OTHER | The remote server denied the requested authentication mode                      |
+| 132  | SSH_ERR_UNKNOWN_HOST   | The remote server's host key could not be verified against the known hosts list |
 
 ## 4. API routines
 
-This version of the SSH API consists of routines that enables usage of PTY, SFTP, SCP
-and RAW subsystem routines, which are described below. API implementations may define
+This version of the SSH API consists of routines that enables usage of PTY, RAW, and
+in futre also other subsystems, which are described below. API implementations may define
 their own additional implementation-specific routines, as described in the MSX-UNAPI
 specification.
 
@@ -262,7 +262,23 @@ Note that SSH might be implemented on the same device that already supports TCP/
 case capabilities bit 8 will be set. If not set, you need a TCP/IP UNAPI device so the SSH solution
 can connect and communicate over network. If built-in, and bit 9 is set, this means that when opening
 a SSH connection the count of TCP/IP connections available in the UNAPI TCP/IP adapter will decrease
-and that the number of available SSH connections will decrease when opening a TCP/IP connection.
+and that the number of available SSH connections will decrease when opening a TCP/IP connection. On
+other hand, by using the TCP/IP functionality internally performance will be improved.
+
+The writer of this specification understand that for most people using PTY is the
+main reason to want SSH on a MSX. As such, I would recommend any developers of Implementations
+to support PTY and support non ANS Escape Code filtering. (SSH PTY Sessions to Linux and Windows terminals
+have several specific codes called OSC that are sent EVEN if we request an ANSI session, filtering
+those on MSX is a little bit CPU intensive, so offering to do this on the implementation helps
+for a better experience, this does not affect SSH BBS's)
+
+Also, it is *strongly advised* to implement host key verification, after all SSH is all about
+security and for maximum security you *should* be looking at the other end public key finger print
+and validating it, to avoid Man In The Middle attacks.
+
+Notice that SSH is unfeasible only using MSX host capabilities (i.e.: z80 or R800 processor), so
+it is expected that ALL SSH implementations will have some sort of hardware acceleration. Ideally
+all should be offloaded to the hardware.
 
 **ERROR CODES**
 
@@ -276,15 +292,14 @@ Invalid information block index specified.
 
 ### 4.2. SSH common routines
 
-Those are routines that are either used for all subsystems (OPEN and CLOSE) or
-relevant for more than one subsystem (STATE, SEND, RCV, AUTH_GET_CHALLENGE and
-AUTH_RESPOND).
+Those are routines that are either used for all subsystems (OPEN, CLOSE, ADD_KNOWN_HOST,
+AUTH_GET_CHALLENGE, AUTH_RESPOND) or relevant for more than one subsystem (STATE, SEND, RCV).
 
 #### 4.2.1. SSH_OPEN: Open an SSH client connection
 
 - Input:
   - A = 2
-  - HL = Address of the parameters block
+  - HL = Address of the parameters block *(at least 44 bytes long block is recommended)*
 
 - Output:
   - A = Error code
@@ -330,10 +345,8 @@ specified in the parameters block. The format of this block is:
       - 0 to X: username, zero terminated
       - X to end: no password or key follows (only the username is provided)
 
-  When flag bit 4 (host key verification) is set, the caller MUST ensure the
-  parameters block has at least 44 bytes to be used. If SSH_ERR_UNKNOWN_HOST is returned,
-  the implementation writes the 44 bytes Base64 Encode of the SHA-256 hash of the remote
-  server's public key into the parameter block (from it's start, overwriting any parameters).
+  When flag bit 4 (host key verification) is set, make sure the parameters block has
+  *AT LEAST* 44 bytes available as implementation may write host key fingerprint on it.
 
 This routine initiates the SSH connection process. The implementation must establish a
 TCP connection to the specified remote IP address and port, perform the SSH handshake,
@@ -352,6 +365,16 @@ or perform any subsystem-specific operations until authentication is completed v
 SSH_AUTH_GET_CHALLENGE and SSH_AUTH_RESPOND routines. The application must poll SSH_STATE
 to detect when authentication succeeds (state transitions to Connected) or fails (state
 transitions to Error).
+
+When Non ANSI Escape Code filtering on PTY is selected (flag bit 3 set), implementation
+will filter any received OSC escape codes on data received from PTY subsystems.
+
+When host key verification is selected (flag bit 4 set) the caller *MUST* ensure the
+parameters block has at least 44 bytes to be used. If SSH_ERR_UNKNOWN_HOST is returned,
+the implementation writes the 44 bytes Base64 Encode of the SHA-256 hash of the remote
+server's public key into the parameter block (from it's start, overwriting any parameters),
+implementations are responsible for calculating the hash, Base64 Encode it and make the
+result a NULL terminated string that has the padding removed.
 
 Only one SSH connection can exist per connection number. If the connection is opened
 successfully, the returned connection number must be used in all subsequent SSH-related
@@ -419,17 +442,17 @@ A valid connection number is returned in B. The SSH handshake is kept alive and
 the implementation caches the server's public key hash and the authentication
 credentials provided in the SSH_OPEN call.
 
-The application must retrieve the 32-byte SHA-256 hash of the server's public key
-from the reserved area at offset paramLen of the parameters block (see above), and
-then choose one of the following actions:
+The application must retrieve the SHA-256 hash fingerprint null terminated string
+of the host public key from the parameters block (see above), and then choose one
+of the following actions:
 
-- **Accept the host key**: Call SSH_ADD_KNOWN_HOST with the connection number.
+- **Accept the host**: Call SSH_ADD_KNOWN_HOST with the connection number.
   The implementation persists the cached hash to the known hosts list, then resumes
   the connection — authentication, channel opening and subsystem setup are carried
   out using the credentials from the original SSH_OPEN call. The connection
   transitions to Connected (state 3) on success, or to Error (state 4) on failure.
 
-- **Reject the host key**: Call SSH_CLOSE with the connection number. The connection
+- **Reject the host**: Call SSH_CLOSE with the connection number. The connection
   is terminated normally.
 
 ---
@@ -490,13 +513,13 @@ one of the following values:
 
 The meaning of the **HL** register depends on the connection state:
 
-- States 0-2, 4 (Closed, Connecting, Authenticating, Error): HL = 0
+- States 0-2, 4 (Closed, Connecting, Authenticating, Error): Ignore
 - State 3 (Connected): HL = Number of total available incoming bytes that can be
   retrieved by using the SSH_RCV routine.
 - State 5 (AuthChallenge): HL = Buffer size required to call SSH_AUTH_GET_CHALLENGE.
   The application should allocate a buffer of at least this size before calling
   SSH_AUTH_GET_CHALLENGE.
-- State 6 (HostUnknown): HL = 0
+- State 6 (HostUnknown): Ignore
 
 **ERROR CODES**
 
@@ -802,11 +825,11 @@ the implementation only stores the value and sends it to the remote server.
 
 The following terminal types are defined:
 
-| Value | Description |
-| --- | --- |
-| 0 | VT-52 |
-| 1 | ANSI (16 colors) |
-| 2 | xterm |
+| Value | Description                        |
+| ----- | ---------------------------------- |
+| 0     | VT-52                              |
+| 1     | ANSI (16 colors)                   |
+| 2     | xterm                              |
 | 3–255 | Reserved for future terminal types |
 
 When a new SSH connection is opened, the terminal type is set to VT-52 (0) by default,
@@ -893,21 +916,21 @@ session:
 ```
   Application                    SSH Implementation              Remote Server
       |                                 |                             |
-      |-- SSH_OPEN(bit2=1,user) ------>|                             |
-      |<-- ERR_OK, conn=B -------------|                             |
-      |                                 |--- TCP connect ----------->|
-      |                                 |<-- TCP established --------|
-      |                                 |--- SSH handshake --------->|
-      |                                 |<-- handshake done ---------|
-      |                                 |--- "none" auth probe ----->|
-      |                                 |<-- keyboard-interactive ---|
-      |                                 |      challenge             |
+      |-- SSH_OPEN(bit2=1,user) ------->|                             |
+      |<-- ERR_OK, conn=B --------------|                             |
+      |                                 |--- TCP connect ------------>|
+      |                                 |<-- TCP established ---------|
+      |                                 |--- SSH handshake ---------->|
+      |                                 |<-- handshake done ----------|
+      |                                 |--- "none" auth probe ------>|
+      |                                 |<-- keyboard-interactive ----|
+      |                                 |      challenge              |
       |                                 |                             |
-      |-- SSH_STATE(conn) ------------>|                             |
-      |<-- B=5 (AuthChallenge), HL=n --|                             |
+      |-- SSH_STATE(conn) ------------->|                             |
+      |<-- B=5 (AuthChallenge), HL=n ---|                             |
       |                                 |                             |
       |-- SSH_AUTH_GET_CHALLENGE(conn)->|                             |
-      |<-- prompts, echo_flags, data --|                             |
+      |<-- prompts, echo_flags, data ---|                             |
       |                                 |                             |
       |   [Display: Name,               |                             |
       |    Instruction,                 |                             |
@@ -916,17 +939,17 @@ session:
       |      read user input            |                             |
       |    Build response block]        |                             |
       |                                 |                             |
-      |-- SSH_AUTH_RESPOND(conn,resp)->|                             |
-      |                                 |--- responses ------------->|
-      |                                 |<-- auth result ------------|
+      |-- SSH_AUTH_RESPOND(conn,resp)-->|                             |
+      |                                 |---- responses ------------->|
+      |                                 |<--- auth result ------------|
       |                                 |                             |
-      |-- SSH_STATE(conn) ------------>|                             |
-      |<-- state                       |                             |
+      |-- SSH_STATE(conn) ------------->|                             |
+      |<--- state                       |                             |
       |                                 |                             |
       |   [if state == AuthChallenge:   |                             |
-      |      goto GET_CHALLENGE        |                             |
+      |      goto GET_CHALLENGE         |                             |
       |    if state == Connected:       |                             |
-      |      use SSH_SEND/SSH_RCV      |                             |
+      |      use SSH_SEND/SSH_RCV       |                             |
       |    if state == Error:           |                             |
       |      abort]                     |                             |
 ```

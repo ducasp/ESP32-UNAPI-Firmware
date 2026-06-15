@@ -85,6 +85,10 @@ Copyright (c) 2019 - 2026 Oduvaldo Pavan Junior ( ducasp@ gmail.com ) All rights
         9. [SSH_AUTH_GET_CHALLENGE](#cusshauthgetchallenge)
         10. [SSH_AUTH_RESPOND](#cusshauthrespond)
         11. [SSH_ADD_KNOWN_HOST](#cusshaddknownhost)
+        12. [SSH_KEY_GEN](#cusshkeygen)
+        13. [SSH_KEY_EXPORT](#cusshkeyexport)
+        14. [SSH_KEY_IMPORT](#cusshkeyimport)
+        15. [SSH_KEY_INFO](#cusshkeyinfo)
 
 
 ## <a name="goals"></a> Introduction / Design Choices - Goals
@@ -1524,7 +1528,7 @@ Information to be retrieved:
 | 4 - 5    | Capabilities Flags                | 16 bits value (LSB MSB).                                                        |
 | 6        | Max. Connections                  | 1 byte value                                                                    |
 | 7        | Free Connections                  | 1 byte value                                                                    |
-| 8 - 9    | Max data per SSH_SEND/SSH_RCV     | 16 bits value (LSB MSB)                                                         |
+| 8 - 9    | Max data per SSH data transfer function (SSH_SEND, SSH_RCV, SSH_KEY_EXPORT, SSH_KEY_IMPORT) | 16 bits value (LSB MSB) |
 
 #### <a name="cusshopen"></a> SSH_OPEN
 
@@ -1539,7 +1543,7 @@ This command will open a new SSH client connection and authenticate to the remot
 | 6        | Subsystem            | 1 byte value (subsystem)                                    |
 | 7        | Flags                | 1 byte value                                                |
 | 8 - X    | Username             | Zero terminated string                                      |
-| X+1 - Y  | Authentication Data  | Zero terminated string (password or private key PEM data)   |
+| X+1 - Y  | Authentication Data  | For password auth: zero terminated password.<br/>For public key auth: no data follows (implementation uses stored key pair). |
 
 Flags byte:
 - Bit 0: Authentication method (0 = password, 1 = public key). Ignored when bit 2 is set.
@@ -1562,7 +1566,7 @@ Flags byte:
 | Position | Function          | Value                                                                                                                                                                                                                                                                                 |
 |:--------:| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0        | CMD_BYTE          | 82                                                                                                                                                                                                                                                                                    |
-| 1        | Error Code        | 0 - Ok<br/>1 - Not implemented (SSH client not supported)<br/>2 - Not connected to the network<br/>4 - Invalid parameters: not enough input data or invalid values<br/>9 - No free connections available, close one and try again<br/>11 - Connection could not be established or authentication failed<br/>127 - Not enough memory to create a new session<br/>128 - The key used as password is invalid format<br/>129 - The key or password used to authenticate session was not accepted<br/>130 - An error occurred while requesting a shell for PTY<br/>131 - Remote server requires keyboard-interactive auth but a different method was requested<br/>132 - Remote server's host key is unknown (host key verification enabled, see response data for fingerprint) |
+| 1        | Error Code        | 0 - Ok<br/>1 - Not implemented (SSH client not supported)<br/>2 - Not connected to the network<br/>4 - Invalid parameters: not enough input data or invalid values<br/>9 - No free connections available, close one and try again<br/>11 - Connection could not be established or authentication failed<br/>127 - Not enough memory to create a new session<br/>128 - The key used as password is invalid format<br/>129 - The key or password used to authenticate session was not accepted<br/>130 - An error occurred while requesting a shell for PTY<br/>131 - Remote server requires keyboard-interactive auth but a different method was requested<br/>132 - Remote server's host key is unknown (host key verification enabled, see response data for fingerprint)<br/>133 - No key pair has been loaded or generated (public key auth requested) |
 | 2 - 3    | Response Size     | 16 bits value (MSB LSB) indicating the size of the response                                                                                                                                                                                                                          |
 |          |                   | This part of response only exists if error code is 0 or 132                                                                                                                                                                                                                          |
 | 4        | Connection Number | 1 byte value (only present if error code is 0 or 132)                                                                                                                                                                                                                                |
@@ -1627,6 +1631,8 @@ This command will retrieve the state of an existing SSH connection.
 
 This command will send data (stdin) over an existing SSH connection.
 
+**Note:** The implementation will use the lowest value between the maximum data per call (returned by SSH_GET_CAPAB) and the data length provided in the input parameters.
+
 *Input Parameters:*
 
 | Position | Function          | Value               |
@@ -1653,6 +1659,8 @@ This command will send data (stdin) over an existing SSH connection.
 #### <a name="cusshrcv"></a> TCPIP_SSH_RCV
 
 This command will retrieve data (stdout/stderr) received from an existing SSH connection.
+
+**Note:** The implementation will use the lowest value between the maximum data per call (returned by SSH_GET_CAPAB) and the maximum data size to retrieve provided in the input parameters.
 
 *Input Parameters:*
 
@@ -1870,5 +1878,127 @@ This command accepts the remote server's host key that was found unknown during 
 | 0        | CMD_BYTE      | 8B                                                                                                                                                                    |
 | 1        | Error Code    | 0 - Ok<br/>1 - Not implemented<br/>4 - Invalid parameters<br/>9 - No free connections<br/>11 - Connection number is not open or is not in HostUnknown state<br/>127 - Not enough memory<br/>128 - Invalid key format<br/>129 - Authentication failed<br/>130 - PTY request error |
 | 2 - 3    | Response Size | 16 bits value (MSB LSB) indicating the size of the response: always 0x0000                                                                                            |
+
+#### <a name="cusshkeygen"></a> SSH_KEY_GEN
+
+This command generates a new ECDSA P-256 key pair and stores it persistently on the device.
+
+*Input Parameters:* none
+
+*Command Structure:*
+
+| Position | Function          | Value |
+|:--------:| ----------------- | ----- |
+| 0        | CMD_BYTE          | 8C    |
+| 1 - 2    | INPUT_PARAMS_SIZE | 0x0000 |
+
+*Response Structure:*
+
+| Position | Function      | Value                                                                                                                |
+|:--------:| ------------- | -------------------------------------------------------------------------------------------------------------------- |
+| 0        | CMD_BYTE      | 8C                                                                                                                   |
+| 1        | Error Code    | 0 - Ok<br/>1 - Not implemented<br/>127 - Not enough memory to generate key pair                                      |
+
+#### <a name="cusshkeyexport"></a> SSH_KEY_EXPORT
+
+This command exports the current key pair (or a selected portion). The private key is exported exactly as stored (PEM format). The public key is exported in OpenSSH Base64 format. Because the key data may exceed the maximum data per call, the export is chunked — call repeatedly until the last block flag (H bit 0) is 1.
+
+*Input Parameters:*
+
+| Position | Function                | Value                                                                                 |
+|:--------:| ----------------------- | ------------------------------------------------------------------------------------- |
+| 0        | B (what to export)      | 0 = Private key only<br/>1 = Public key only<br/>2 = Both (private + null + public)   |
+| 1 - 2    | HL (max data per chunk) | 16 bits value (LSB MSB). Clamped to device maximum (2048).                            |
+
+*Command Structure:*
+
+| Position | Function          | Value                                                               |
+|:--------:| ----------------- | ------------------------------------------------------------------- |
+| 0        | CMD_BYTE          | 8D                                                                  |
+| 1 - 2    | INPUT_PARAMS_SIZE | 16 bits value (MSB LSB)                                             |
+| 3 - 5    | INPUT_PARAMS      | B (1 byte) + HL (2 bytes LSB MSB)                                   |
+
+*Response Structure (error = 0):*
+
+| Position | Function                      | Value                                                              |
+|:--------:| ----------------------------- | ------------------------------------------------------------------ |
+| 0        | CMD_BYTE                      | 8D                                                                 |
+| 1        | Error Code                    | 0 - Ok<br/>4 - Invalid parameters<br/>127 - Not enough memory<br/>133 - No key pair loaded |
+| 2 - 3    | Response Size                 | 16 bits value (MSB LSB)                                            |
+| 4 - 5    | BC (bytes written this chunk) | 16 bits value (LSB MSB)                                            |
+| 6        | H flags                       | bit 0: 1 = last block, export complete                             |
+| 7 - X    | Key data                      | Chunk of key data                                                  |
+
+For B=2 (both), the data consists of: private key PEM text, a null byte separator, then public key OpenSSH Base64 text, null terminated.
+
+#### <a name="cusshkeyimport"></a> SSH_KEY_IMPORT
+
+This command imports a private key file into the device. The implementation validates the private key, extracts the public key from it, and stores both persistently.
+
+Since the private key file may exceed the maximum data per call, it is sent in one or more chunks. When the last block flag (C bit 0) is 0, the implementation accumulates the data and waits for the next chunk. When C bit 0 is 1, the implementation finalizes the import: it validates the complete private key and stores the key pair, replacing any previously stored key.
+
+The input data is the raw content of a private key file in a format supported by the implementation, for example PEM format (such as "BEGIN EC PRIVATE KEY", "BEGIN RSA PRIVATE KEY", or "BEGIN OPENSSH PRIVATE KEY"). It is up to each implementation to document what key types, formats, and sizes it accepts.
+
+*Input Parameters:*
+
+| Position | Function                      | Value                                                                                 |
+|:--------:| ----------------------------- | ------------------------------------------------------------------------------------- |
+| 0        | C flags                       | bit 0: 1 = last block (final chunk)<br/>bits 1-7: reserved, must be zero             |
+| 1 - 2    | HL (data length of this chunk)| 16 bits value (LSB MSB). Clamped to device maximum (2048).                            |
+| 3 - X    | Private key file data         | Content of a private key file in a supported format (e.g. PEM text).                  |
+
+*Command Structure:*
+
+| Position | Function          | Value                                                               |
+|:--------:| ----------------- | ------------------------------------------------------------------- |
+| 0        | CMD_BYTE          | 8E                                                                  |
+| 1 - 2    | INPUT_PARAMS_SIZE | 16 bits value (MSB LSB)                                             |
+| 3 - X    | INPUT_PARAMS      | C flags (1 byte) + HL data length (2 bytes LSB MSB) + private key data |
+
+*Response Structure:*
+
+| Position | Function      | Value                                                                                                                |
+|:--------:| ------------- | -------------------------------------------------------------------------------------------------------------------- |
+| 0        | CMD_BYTE      | 8E                                                                                                                   |
+| 1        | Error Code    | 0 - Ok<br/>1 - Not implemented<br/>4 - Invalid parameters<br/>13 - Insufficient buffer to accumulate key data<br/>134 - Key data is invalid, corrupt, or in an unsupported format |
+| 2 - 3    | Response Size | 16 bits value (MSB LSB): always 0x0000                                                                               |
+
+#### <a name="cusshkeyinfo"></a> SSH_KEY_INFO
+
+This command returns information about the currently stored key pair, and optionally the public key fingerprint. The fingerprint is an unpadded Base64 encoded SHA-256 hash of the public key (identical format to the host key fingerprint returned by SSH_OPEN with flag bit 4 set).
+
+*Input Parameters:*
+
+| Position | Function           | Value                                                                                 |
+|:--------:| ------------------ | ------------------------------------------------------------------------------------- |
+| 0        | Flags              | bit 0: 1 = include fingerprint string in response (caller provided buffer for it)     |
+|          |                    | bits 1-7: reserved, must be zero                                                      |
+
+*Command Structure:*
+
+| Position | Function          | Value                                                               |
+|:--------:| ----------------- | ------------------------------------------------------------------- |
+| 0        | CMD_BYTE          | 8F                                                                  |
+| 1 - 2    | INPUT_PARAMS_SIZE | 16 bits value (MSB LSB)                                             |
+| 3        | INPUT_PARAMS      | Flags byte                                                          |
+
+*Response Structure (error = 0, query only):*
+
+| Position | Function      | Value                                                                                                                |
+|:--------:| ------------- | -------------------------------------------------------------------------------------------------------------------- |
+| 0        | CMD_BYTE      | 8F                                                                                                                   |
+| 1        | Error Code    | 0 - Ok                                                                                                               |
+| 2 - 3    | Response Size | 0x0001                                                                                                               |
+| 4        | B flags       | bit 0: 1 = key pair is currently stored                                                                              |
+
+*Response Structure (error = 0, with fingerprint):*
+
+| Position | Function      | Value                                                                                                                |
+|:--------:| ------------- | -------------------------------------------------------------------------------------------------------------------- |
+| 0        | CMD_BYTE      | 8F                                                                                                                   |
+| 1        | Error Code    | 0 - Ok                                                                                                               |
+| 2 - 3    | Response Size | variable                                                                                                             |
+| 4        | B flags       | bit 0: 1 = key pair is currently stored                                                                              |
+| 5 - X    | Fingerprint   | Unpadded Base64 SHA-256 public key fingerprint, null-terminated string                                                |
 
 

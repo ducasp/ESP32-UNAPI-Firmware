@@ -162,7 +162,11 @@ enum SshUnapiFunctions {
   SSH_WIN_SIZE = 136,
   SSH_AUTH_GET_CHALLENGE = 137,
   SSH_AUTH_RESPOND = 138,
-  SSH_ADD_KNOWN_HOST = 139
+  SSH_ADD_KNOWN_HOST = 139,
+  SSH_KEY_GEN = 140,
+  SSH_KEY_EXPORT = 141,
+  SSH_KEY_IMPORT = 142,
+  SSH_KEY_INFO = 143
 };
 
 enum TcpipUnapiGetCapabParam1
@@ -208,7 +212,9 @@ enum SSHErrorCodes {
   SSH_ERR_PWD,
   SSH_ERR_PTY_REQ,
   SSH_ERR_AUTH_TRY_OTHER,
-  SSH_ERR_UNKNOWN_HOST
+  SSH_ERR_UNKNOWN_HOST,
+  SSH_ERR_NO_KEY,       // = 133
+  SSH_ERR_KEY_INV_DATA  // = 134
 };
 
 enum SshConnectionStates {
@@ -239,6 +245,10 @@ enum SshSubsystems {
 
 #define SSH_KNOWN_HOST_HASH_SIZE 32
 #define SSH_KNOWN_HOSTS_FILE "/ssh_known_hosts"
+#define SSH_KEY_PRIV_FILE "/ssh_key_priv.pem"
+#define SSH_KEY_PUB_FILE "/ssh_key_pub.pem"
+#define SSH_KEY_FINGERPRINT_BUF 44
+#define SSH_KEY_IMPORT_BUF_MAX 8192
 #define SSH_CRED_USER_MAX 128
 #define SSH_CRED_SECRET_MAX 2048
 
@@ -248,7 +258,8 @@ typedef enum {
     STATE_ESC,              // Found ESC (\x1b)
     STATE_CSI,              // Found CSI (ESC [)
     STATE_SKIP_CSI,         // Discard state for unsupported CSI sequences (Xterm/Mouse)
-    STATE_SKIP_OSC          // Discard state for OSC commands (Windows window titles)
+    STATE_SKIP_OSC,         // Discard state for OSC commands (Windows window titles)
+    STATE_OSC_EXPECT_ST     // In OSC, saw 0x1B, expect ST terminator (\)
 } parse_state_t;
 
 // Bundle all state variables into a single struct

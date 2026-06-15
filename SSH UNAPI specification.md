@@ -40,19 +40,29 @@
 
 [4.2.8. SSH_ADD_KNOWN_HOST: Accept an unknown host key and resume connection](#428-ssh_add_known_host-accept-an-unknown-host-key-and-resume-connection)
 
-[4.3. SSH PTY specific routines](#43-ssh-pty-specific-routines)
+[4.3. SSH Key Management routines](#43-ssh-key-management-routines)
 
-[4.3.1. SSH_TERM_TYPE: Get/set the SSH terminal type](#431-ssh_term_type-getset-the-ssh-terminal-type)
+[4.3.1. SSH_KEY_GEN: Generate a key pair](#431-ssh_key_gen-generate-a-key-pair)
 
-[4.3.2. SSH_WIN_SIZE: Get/set the SSH window size](#432-ssh_win_size-getset-the-ssh-window-size)
+[4.3.2. SSH_KEY_EXPORT: Export a key pair](#432-ssh_key_export-export-a-key-pair)
 
-[4.4. SSH SFTP specific routines](#44-ssh-sftp-specific-routines)
+[4.3.3. SSH_KEY_IMPORT: Import a key pair](#433-ssh_key_import-import-a-key-pair)
 
-[4.5. SSH SCP specific routines](#45-ssh-scp-specific-routines)
+[4.3.4. SSH_KEY_INFO: Get key pair information](#434-ssh_key_info-get-key-pair-information)
 
-[4.6. Usage examples](#46-usage-examples)
+[4.4. SSH PTY specific routines](#44-ssh-pty-specific-routines)
 
-[4.6.1. Keyboard-interactive authentication example](#461-keyboard-interactive-authentication-example)
+[4.4.1. SSH_TERM_TYPE: Get/set the SSH terminal type](#441-ssh_term_type-getset-the-ssh-terminal-type)
+
+[4.4.2. SSH_WIN_SIZE: Get/set the SSH window size](#442-ssh_win_size-getset-the-ssh-window-size)
+
+[4.5. SSH SFTP specific routines](#45-ssh-sftp-specific-routines)
+
+[4.6. SSH SCP specific routines](#46-ssh-scp-specific-routines)
+
+[4.7. Usage examples](#47-usage-examples)
+
+[4.7.1. Keyboard-interactive authentication example](#471-keyboard-interactive-authentication-example)
 
 ## 1. Introduction
 
@@ -101,8 +111,8 @@ specification, or only a subset of it. Of course, the less capabilities are impl
 given implementation, the greater are the chances that a particular client application will
 not work with it, especially the most basic capabilities. For example, an implementation
 not providing any support for PTY subsystem will not be very useful; on the other hand,
-an implementation that supports PTY but does not support public key authentication
-will probably still work fine with most client applications.
+an implementation that supports PTY but does not support keyboard-interactive
+authentication will probably still work fine with most client applications.
 
 The modularity feature is implemented in two ways:
 
@@ -156,6 +166,8 @@ of 127 to 255.
 | 130  | SSH_ERR_PTY_REQ        | An error occurred while requesting a shell for PTY                              |
 | 131  | SSH_ERR_AUTH_TRY_OTHER | The remote server denied the requested authentication mode                      |
 | 132  | SSH_ERR_UNKNOWN_HOST   | The remote server's host key could not be verified against the known hosts list |
+| 133  | SSH_ERR_NO_KEY         | No key pair has been loaded or generated                                     |
+| 134  | SSH_ERR_KEY_INV_DATA   | The imported key data is invalid or in an unsupported format                 |
 
 ## 4. API routines
 
@@ -216,7 +228,7 @@ This routine never fails. ERR_OK is always returned.
     - HL = Capabilities flags
     - B = Maximum simultaneous SSH connections supported
     - C = Free SSH connections currently available
-    - DE = Maximum data size per SSH_SEND and SSH_RCV call (0 = no documented limit)
+    - DE = Maximum data size for command data in SSH functions (SSH_SEND, SSH_RCV, SSH_KEY_EXPORT, SSH_KEY_IMPORT, and any future data-transfer function). When a caller specifies a larger size in HL, the implementation uses the lower of the two values. (0 = no documented limit)
 
     Other information blocks are not currently supported in this specification. There is
     a provision for multiple blocks just in case those are needed in future.
@@ -251,11 +263,11 @@ Bit 0 is LSB of register L, bit 8 is LSB of register H.
 - Bit 7: Always set to 0
 - Bit 8: Built-in TCP/IP
 - Bit 9: Connection pool shared with built-in TCP/IP
-- Bit 10: Supports Public Key Authentication
+- Bit 10: Supports Public Key Authentication (when set, SSH_KEY_GEN and SSH_KEY_INFO are mandatory)
 - Bit 11: Supports Keyboard-Interactive Authentication
 - Bit 12: Supports non ANSI Escape Code filtering on PTY
 - Bit 13: Supports host key verification
-- Bit 14: Always set to 0
+- Bit 14: Supports Key Import/Export (SSH_KEY_IMPORT and SSH_KEY_EXPORT)
 - Bit 15: Always set to 0
 
 Note that SSH might be implemented on the same device that already supports TCP/IP UNAPI. In such
@@ -300,7 +312,6 @@ AUTH_GET_CHALLENGE, AUTH_RESPOND) or relevant for more than one subsystem (STATE
 - Input:
   - A = 2
   - HL = Address of the parameters block *(at least 44 bytes long block is recommended)*
-  - DE = Address of the public/private keys pair
 
 - Output:
   - A = Error code
@@ -335,7 +346,12 @@ specified in the parameters block. The format of this block is:
   For password (bits 0-2 = 000) method:
     +8 (variable):
       - 0 to X: username, zero terminated
-      - X to end: password or public key, zero terminated
+      - X to end: password, zero terminated
+
+  For public key (bits 0-2 = 001):
+    +8 (variable):
+      - 0 to X: username, zero terminated
+      - X to end: no credentials follow (the implementation uses the stored key pair)
 
   For anonymous authentication (bit 1 = 1) and public key (bits 0-2 = 001):
     +8 (variable):
@@ -377,9 +393,9 @@ server's public key into the parameter block (from it's start, overwriting any p
 implementations are responsible for calculating the hash, Base64 Encode it and make the
 result a NULL terminated string that has the padding removed.
 
-When doing public key authentication, you must have the private and public key in PEM
-format loaded in the memory area pointed by DE. First private, then 00 to indicate it has
-ended and next the public key, also with a 00 at the end to indicate it has ended.
+When public key authentication is requested (flag bit 0 = 1), the implementation
+authenticates using the key pair previously generated with SSH_KEY_GEN or imported
+with SSH_KEY_IMPORT. If no key pair is available, SSH_ERR_NO_KEY is returned.
 
 Only one SSH connection can exist per connection number. If the connection is opened
 successfully, the returned connection number must be used in all subsequent SSH-related
@@ -419,6 +435,11 @@ or authentication failed.
 - SSH_ERR_NO_RSS
 
 There is not enough memory on the device handling SSH connections to create a new session.
+
+- SSH_ERR_NO_KEY
+
+No key pair has been loaded or generated (public key authentication requested but
+no key pair available).
 
 - SSH_ERR_INV_KEY
 
@@ -553,6 +574,9 @@ This routine sends data to the SSH channel associated with the specified connect
 This works for PTY and RAW subsystems. For other subsystems use only the functions
 designated for it.
 
+The implementation will use the lowest value between the maximum data size (returned
+by SSH_GET_CAPAB in DE) and the data length provided by the caller in HL.
+
 **ERROR CODES**
 
 - ERR_OK
@@ -591,7 +615,9 @@ connection. This works for PTY and RAW subsystems. For other subsystems use only
 functions designated for it.
 
 The maximum number of bytes that can be retrieved is specified in HL. The actual number
-of bytes retrieved is returned in BC. If no data is available, ERR_NO_DATA is returned.
+of bytes retrieved is returned in BC. The implementation will use the lowest value between
+the maximum data size (returned by SSH_GET_CAPAB in DE) and the buffer length provided
+by the caller in HL. If no data is available, ERR_NO_DATA is returned.
 
 **ERROR CODES**
 
@@ -804,9 +830,200 @@ The connection could not be resumed (e.g., the remote server disconnected).
 
 ---
 
-### 4.3. SSH PTY specific routines
+### 4.3. SSH Key Management routines
 
-#### 4.3.1. SSH_TERM_TYPE: Get/set the SSH terminal type
+These routines manage the key pair used for public key authentication. The key pair is
+generated, imported, or queried independently of any SSH connection, and is stored
+persistently by the implementation. When public key authentication is requested via
+SSH_OPEN, the implementation uses the key pair managed by these routines.
+
+If bit 10 (Public Key Authentication) is set in the SSH_GET_CAPAB capabilities flags,
+SSH_KEY_GEN and SSH_KEY_INFO are mandatory. SSH_KEY_IMPORT and SSH_KEY_EXPORT are
+optional, indicated by bit 14 (Key Import/Export).
+
+#### 4.3.1. SSH_KEY_GEN: Generate a key pair
+
+- Input:
+  - A = 12
+
+- Output:
+  - A = Error code
+
+This routine generates a new key pair and stores it persistently by the implementation.
+
+It is up to each implementation to determine the key type (e.g., RSA, Ed25519) and
+key size that best fits its capabilities. The newly generated key pair replaces any
+previously stored key pair.
+
+**ERROR CODES**
+
+- ERR_OK
+
+The key pair has been generated and stored.
+
+- ERR_NOT_IMP
+
+Key generation is not implemented (capability bit 10 not set).
+
+- SSH_ERR_NO_RSS
+
+There is not enough memory on the device to generate a key pair.
+
+---
+
+#### 4.3.2. SSH_KEY_EXPORT: Export a key pair
+
+- Input:
+  - A = 13
+  - B = What to export:
+    - 0: Private key only
+    - 1: Public key only
+    - 2: Both (private + public, separated by a zero byte)
+  - DE = Address of the output buffer
+  - HL = Maximum data size for this chunk
+
+- Output:
+  - A = Error code
+  - BC = Number of bytes written to the buffer
+  - H = Status flags:
+    - bit 0: 1 = last block (export complete, no more data available)
+
+This routine exports the currently stored key pair (or a selected portion) to a
+caller-provided buffer. Because keys can be larger than the maximum data per call
+(returned by SSH_GET_CAPAB in DE), the export uses an internal cursor and supports
+chunked transfer.
+
+The private key is exported exactly as stored internally by the implementation (PEM
+format). The public key is exported in OpenSSH Base64 format, extracted from the
+stored private key.
+
+On the first call, the implementation initializes the internal export cursor for the
+requested B value. Subsequent calls continue from where the previous call left off.
+To export a different portion (e.g., switch from private to public), the caller must
+complete the current export first.
+
+The implementation will use the lowest value between the maximum data size (returned
+by SSH_GET_CAPAB in DE) and the buffer length provided by the caller in HL.
+
+**ERROR CODES**
+
+- ERR_OK
+
+The data has been written to the buffer.
+
+- ERR_NOT_IMP
+
+Key export is not implemented (capability bit 14 not set).
+
+- SSH_ERR_NO_KEY
+
+No key pair has been loaded or generated.
+
+- ERR_BUFFER
+
+Insufficient output buffer space.
+
+- ERR_INV_PARAM
+
+An invalid value was specified for B.
+
+---
+
+#### 4.3.3. SSH_KEY_IMPORT: Import a key pair
+
+- Input:
+  - A = 14
+  - C = Control flags:
+    - bit 0: 1 = this is the last block (final chunk)
+    - bits 1-7: Reserved, must be zero
+  - DE = Address of the input buffer with key data
+  - HL = Data length of this chunk
+
+- Output:
+  - A = Error code
+
+This routine imports a private key file into the implementation in one or more chunks.
+The implementation validates the private key, extracts the public key from it, and
+stores both persistently, replacing any previously stored key pair.
+
+When C bit 0 is 0, the implementation accumulates the data and waits for the next chunk.
+When C bit 0 is 1, the implementation finalizes the import, validates the complete
+private key, and stores the key pair.
+
+The input data is the raw content of a private key file in a format supported by the
+implementation (for example, PEM format with "BEGIN EC PRIVATE KEY",
+"BEGIN RSA PRIVATE KEY", or "BEGIN OPENSSH PRIVATE KEY" headers). It is up to each
+implementation to document what key types, formats, and sizes it accepts.
+
+The implementation will use the lowest value between the maximum data size (returned
+by SSH_GET_CAPAB in DE) and the data length provided by the caller in HL.
+
+**ERROR CODES**
+
+- ERR_OK
+
+The key pair has been imported and stored.
+
+- ERR_NOT_IMP
+
+Key import is not implemented (capability bit 14 not set).
+
+- SSH_ERR_KEY_INV_DATA
+
+The provided private key data is invalid, corrupt, or in an unsupported format.
+
+- ERR_INV_PARAM
+
+An invalid parameter was specified.
+
+- ERR_BUFFER
+
+Insufficient buffer space to accumulate the key data.
+
+---
+
+#### 4.3.4. SSH_KEY_INFO: Get key pair information
+
+- Input:
+  - A = 15
+  - DE = Address of the fingerprint buffer (must have at least 44 bytes).
+    Set to 0 if only checking key presence.
+
+- Output:
+  - A = Error code
+  - B = Key status flags:
+    - bit 0: 1 = a key pair is currently stored
+
+This routine returns information about the currently stored key pair.
+
+If DE = 0, the routine purely queries key presence: ERR_OK is returned and bit 0 of
+B indicates whether a key pair is stored.
+
+If DE is not zero and a key pair is stored, the routine writes the unpadded Base64
+SHA-256 public key fingerprint as a null-terminated string to the buffer. The buffer
+must have at least 44 bytes.
+
+If DE is not zero and no key pair is stored, SSH_ERR_NO_KEY is returned.
+
+**ERROR CODES**
+
+- ERR_OK
+
+The requested information has been returned.
+
+- ERR_NOT_IMP
+
+Key information is not implemented (capability bit 10 not set).
+
+- SSH_ERR_NO_KEY
+
+No key pair has been loaded or generated.
+
+---
+
+### 4.4. SSH PTY specific routines
+
+#### 4.4.1. SSH_TERM_TYPE: Get/set the SSH terminal type
 
 - Input:
   - A = 7
@@ -860,7 +1077,7 @@ There is no PTY subsystem capability.
 
 ---
 
-#### 4.3.2. SSH_WIN_SIZE: Get/set the SSH window size
+#### 4.4.2. SSH_WIN_SIZE: Get/set the SSH window size
 
 - Input:
   - A = 8
@@ -903,17 +1120,17 @@ There is no PTY subsystem capability.
   - An invalid value was specified for the operation (C).
   - Zero was specified for rows or columns.
 
-### 4.4. SSH SFTP specific routines
+### 4.5. SSH SFTP specific routines
 
 To be defined in a future revision
 
-### 4.5. SSH SCP specific routines
+### 4.6. SSH SCP specific routines
 
 To be defined in a future revision
 
-### 4.6. Usage examples
+### 4.7. Usage examples
 
-#### 4.6.1. Keyboard-interactive authentication example
+#### 4.7.1. Keyboard-interactive authentication example
 
 The following diagram illustrates the flow of a keyboard-interactive authentication
 session:

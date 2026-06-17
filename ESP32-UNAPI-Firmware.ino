@@ -64,9 +64,11 @@ v0.3
 #include "HTTPClient.h"
 #include "mbedtls/md.h"
 #include <base64.h>
+#include <esp_wifi.h>
+#include <lwip/sockets.h>
 
 #define HTTP_PACKET_SIZE 2048
-SET_LOOP_TASK_STACK_SIZE(65536); // Set loopTask to 32KB, otherwise SSH functions will crash
+SET_LOOP_TASK_STACK_SIZE(65536); // 64KB stack — best balance for DRAM vs headroom
 WiFiClientSecure *TClient1;
 static char *g_caPem = NULL;
 static size_t g_caPemLen = 0;
@@ -172,6 +174,7 @@ static bool    g_sshKeyLoaded = false;
 static uint8_t *g_exportBuf = NULL;
 static size_t   g_exportLen = 0;
 static size_t   g_exportOff = 0;
+
 
 // Chunked import state
 static uint8_t *g_importBuf = NULL;
@@ -516,10 +519,15 @@ void setup() {
     FFat.begin(true);
   }
 
+  // Pre-allocate SSH transfer buffers once to avoid heap fragmentation
+  g_exportBuf = (uint8_t*)malloc(SSH_KEY_IMPORT_BUF_MAX);
+  g_importBuf = (uint8_t*)malloc(SSH_KEY_IMPORT_BUF_MAX);
+
   sshInitKeyPair();
   initKnownHostsFile();
 
   WiFi.setSleep(false);
+  esp_wifi_set_ps(WIFI_PS_NONE);
   WiFi.persistent(true);
   WiFi.begin();
   if (stDeviceConfiguration.ucAutoClock!=3)
@@ -1236,12 +1244,10 @@ static void sshFreeKeyPair() {
 }
 
 static void sshExportCleanup() {
-    if (g_exportBuf) { free(g_exportBuf); g_exportBuf = NULL; }
     g_exportLen = g_exportOff = 0;
 }
 
 static void sshImportCleanup() {
-    if (g_importBuf) { free(g_importBuf); g_importBuf = NULL; }
     g_importLen = 0;
 }
 
@@ -1304,7 +1310,7 @@ static byte sshKeyExport(byte what, byte *buf, unsigned int maxSize,
     if (!g_sshKeyLoaded) return SSH_ERR_NO_KEY;
     if (what > 2) return UNAPI_ERR_INV_PARAM;
 
-    if (g_exportBuf == NULL) {
+    if (g_exportLen == 0) {
         char *privPem = NULL;
         char *pubB64 = NULL;
 
@@ -1370,9 +1376,7 @@ static byte sshKeyExport(byte what, byte *buf, unsigned int maxSize,
 
 static byte sshKeyImport(byte lastBlock, byte *data, unsigned int dataLen) {
     if (!g_importBuf) {
-        g_importBuf = (uint8_t*)malloc(SSH_KEY_IMPORT_BUF_MAX);
-        if (!g_importBuf) return SSH_ERR_NO_RSS;
-        g_importLen = 0;
+        return SSH_ERR_NO_RSS;
     }
     if (g_importLen + dataLen > SSH_KEY_IMPORT_BUF_MAX) {
         sshImportCleanup();
@@ -1503,6 +1507,11 @@ static byte sshOpen(byte *params, unsigned int paramLen, byte *outConnNum) {
   if (ssh_connect(session) != SSH_OK) {
     ssh_free(session);
     return UNAPI_ERR_NO_CONN;
+  }
+  {
+    socket_t sock = ssh_get_fd(session);
+    int rcvbuf = 4096;
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (const char*)&rcvbuf, sizeof(rcvbuf));
   }
 
   // Host key verification (bit 4)
@@ -1946,10 +1955,10 @@ void received_data_parser () {
   unsigned int iAPItemI,iPWDCount;
   bool bOkParam = false;
   bool bPWD = false;
-  unsigned char ucSSID[33];
-  unsigned char ucPWD[65];
-  unsigned char ucOTAServer[256];
-  unsigned char ucOTAFile[256];
+  static unsigned char ucSSID[33];
+  static unsigned char ucPWD[65];
+  static unsigned char ucOTAServer[256];
+  static unsigned char ucOTAFile[256];
   uint16_t uiOTAPort;
   String stOTAServer,stOTAFile,stVersion;
   WiFiClient OTAclient;
@@ -3129,6 +3138,10 @@ proccesscmd:
                         case 3: ipToBytes(externalIP, btIPConnection3); break;
                         case 4: ipToBytes(externalIP, btIPConnection4); break;
                       }
+                      {
+                        int rcvbuf = 4096;
+                        TClient1->setSocketOption(SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+                      }
                       btConnections[uiForHelper] = CONN_TCP_TLS_A;
                       btIsTransient[uiForHelper] = btCMDTransient;
                       SendResponse(btCommand,UNAPI_ERR_OK,1,&btCMDConnNumber);
@@ -3167,6 +3180,10 @@ proccesscmd:
                         case 2: ipToBytes(externalIP, btIPConnection2); break;
                         case 3: ipToBytes(externalIP, btIPConnection3); break;
                         case 4: ipToBytes(externalIP, btIPConnection4); break;
+                      }
+                      {
+                        int rcvbuf = 4096;
+                        ClientList[uiForHelper]->setSocketOption(SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
                       }
                       btConnections[uiForHelper] = CONN_TCP_ACTIVE;
                       btIsTransient[uiForHelper] = btCMDTransient;
@@ -3846,7 +3863,6 @@ proccesscmd:
   if (!stDeviceConfiguration.ucAlwaysOn)
     ScheduleTimeoutCheck();
 }
-
 void loop() {
   unsigned int uiI;
 

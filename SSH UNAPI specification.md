@@ -168,6 +168,7 @@ of 127 to 255.
 | 132  | SSH_ERR_UNKNOWN_HOST   | The remote server's host key could not be verified against the known hosts list |
 | 133  | SSH_ERR_NO_KEY         | No key pair has been loaded or generated                                     |
 | 134  | SSH_ERR_KEY_INV_DATA   | The imported key data is invalid or in an unsupported format                 |
+| 135  | SSH_ERR_BUSY           | The implementation cannot accept a new SSH_OPEN because another connection is pending host key approval. Close or resolve the pending connection first. |
 
 ## 4. API routines
 
@@ -458,15 +459,22 @@ An error occurred while requesting a shell for PTY.
 The remote server requires keyboard-interactive authentication but a different
 authentication method was requested via the flags field.
 
+- SSH_ERR_BUSY
+
+  Another SSH connection is in the pending-host-key-approval state
+  (SSH_ERR_UNKNOWN_HOST was returned and SSH_ADD_KNOWN_HOST has not been called
+  yet). Only one connection can be in this state at a time. Close the pending
+  connection first.
+
 - SSH_ERR_UNKNOWN_HOST
 
-Host key verification was requested (flag bit 4 set) and the remote server's host
-key could not be verified against the known hosts list. The connection enters the
-HostUnknown (state 6) state.
+  Host key verification was requested (flag bit 4 set) and the remote server's host
+  key could not be verified against the known hosts list. The connection enters the
+  HostUnknown (state 6) state.
 
-A valid connection number is returned in B. The SSH handshake is kept alive and
-the implementation caches the server's public key hash and the authentication
-credentials provided in the SSH_OPEN call.
+  A valid connection number is returned in B. The SSH handshake is kept alive and
+  the implementation caches the server's public key hash and the authentication
+  credentials provided in the SSH_OPEN call.
 
 The application must retrieve the SHA-256 hash fingerprint null terminated string
 of the host public key from the parameters block (see above), and then choose one

@@ -16,7 +16,10 @@ https://github.com/ducasp/MSX-Development/tree/master/UPDTESP
 
 # How to build it
 
-You will need Arduino IDE and install ESP32 Arduino IDE
+You will need Arduino IDE and install ESP32 Arduino IDE and LibSSH-ESP32
+
+I STRONGLY RECOMMEND that you stick to LibSSH-ESP32 5.8.0 and update it with the changed files in the LibSSH-ESP32-Modifications folder,
+those changes greatly reduce memory heap fragmentation and allow stable SSH connections for really long periods.
 
 Choose the proper ESP32 module/board you are targeting.
 

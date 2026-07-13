@@ -41,8 +41,9 @@ Copyright (c) 2019 - 2026 Oduvaldo Pavan Junior ( ducasp@ gmail.com ) All rights
       26. [Release Connection](#creleaseconn)
       27. [Turn Wi-Fi Off](#cturnwifioff)
       28. [Turn RS232 Off](#cturnrs232off)
-      29. [Clear AP from memory](#cclearap)
-   2. [UNAPI Commands](#ucommands)
+       29. [Clear AP from memory](#cclearap)
+       30. [Device Health](#cdevhealth)
+    2. [UNAPI Commands](#ucommands)
       1. [TCPIP_GET_CAPAB](#cugetcapab)
       2. [TCPIP_GET_IPINFO](#cugetipinfo)
       3. [TCPIP_NET_STATE](#cunetstate)
@@ -845,6 +846,36 @@ This command requests that the current AP is forgotten. Wi-Fi connection, if any
 | 0        | CMD_BYTE   | 'a'           |
 | 1        | Error Code | 0 - always Ok |
 
+#### <a name="cdevhealth"></a> Device Health
+
+This command outputs debugging information about the device's memory and filesystem status. It is intended for diagnostic purposes only. The response is free-form human-readable text, not a structured binary response.
+
+*Input Parameters:* none
+
+*Command Structure:*
+
+| Position | Function | Value |
+|:--------:|:-------- |:----- |
+| 0        | CMD_BYTE | 'w'   |
+
+*Response:*
+
+Free-form text lines are written directly to the serial port. The output consists of:
+
+```
+Free_Heap: <bytes> | Max_Block: <bytes>
+FFAT - Free space: <bytes> Total FFAspace:<bytes>
+FILE: <filename>    SIZE: <bytes>
+...
+```
+
+Where:
+- `Free_Heap`: Total free heap memory available for 8-bit allocations (in bytes)
+- `Max_Block`: Largest contiguous free heap block (in bytes) — higher is better for avoiding allocation failures
+- `FFAT - Free space`: Free space on the FFAT filesystem (in bytes)
+- `Total FFAspace`: Total capacity of the FFAT filesystem (in bytes)
+- `FILE` entries: Each file on the root of the filesystem, listed with its name and size in bytes
+
 ### <a name="ucommands"></a> TCP/IP UNAPI Commands
 
 The intent of this document is not to explain each command functionality. It is only to tell how the input parameters from UNAPI Commands should be ordered and how the output result will be ordered on the command response. For more details on how each UNAPI command work read the [MSX-UNAPI-specification/TCP-IP UNAPI specification](https://github.com/Konamiman/MSX-UNAPI-specification/blob/master/docs/TCP-IP%20UNAPI%20specification.md).
@@ -1566,7 +1597,7 @@ Flags byte:
 | Position | Function          | Value                                                                                                                                                                                                                                                                                 |
 |:--------:| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0        | CMD_BYTE          | 82                                                                                                                                                                                                                                                                                    |
-| 1        | Error Code        | 0 - Ok<br/>1 - Not implemented (SSH client not supported)<br/>2 - Not connected to the network<br/>4 - Invalid parameters: not enough input data or invalid values<br/>9 - No free connections available, close one and try again<br/>11 - Connection could not be established or authentication failed<br/>127 - Not enough memory to create a new session<br/>128 - The key used as password is invalid format<br/>129 - The key or password used to authenticate session was not accepted<br/>130 - An error occurred while requesting a shell for PTY<br/>131 - Remote server requires keyboard-interactive auth but a different method was requested<br/>132 - Remote server's host key is unknown (host key verification enabled, see response data for fingerprint)<br/>133 - No key pair has been loaded or generated (public key auth requested) |
+| 1        | Error Code        | 0 - Ok<br/>1 - Not implemented (SSH client not supported)<br/>2 - Not connected to the network<br/>4 - Invalid parameters: not enough input data or invalid values<br/>9 - No free connections available, close one and try again<br/>11 - Connection could not be established or authentication failed<br/>127 - Not enough memory to create a new session<br/>128 - The key used as password is invalid format<br/>129 - The key or password used to authenticate session was not accepted<br/>130 - An error occurred while requesting a shell for PTY<br/>131 - Remote server requires keyboard-interactive auth but a different method was requested<br/>132 - Remote server's host key is unknown (host key verification enabled, see response data for fingerprint)<br/>133 - No key pair has been loaded or generated (public key auth requested)<br/>135 - Another connection is pending host key approval, close or approve the pending connection first |
 | 2 - 3    | Response Size     | 16 bits value (MSB LSB) indicating the size of the response                                                                                                                                                                                                                          |
 |          |                   | This part of response only exists if error code is 0 or 132                                                                                                                                                                                                                          |
 | 4        | Connection Number | 1 byte value (only present if error code is 0 or 132)                                                                                                                                                                                                                                |

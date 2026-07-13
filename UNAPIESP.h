@@ -108,6 +108,7 @@ enum CustomFunctions {
   CUSTOM_F_HOLDCONNECTION = 'H',
   CUSTOM_F_RELEASECONNECTION = 'h',
   CUSTOM_F_GETAPSTS = 'g',
+  CUSTOM_F_DEVHEALTH = 'w',
   CUSTOM_F_QUERY = '?'
 };
 
@@ -214,7 +215,8 @@ enum SSHErrorCodes {
   SSH_ERR_AUTH_TRY_OTHER,
   SSH_ERR_UNKNOWN_HOST,
   SSH_ERR_NO_KEY,       // = 133
-  SSH_ERR_KEY_INV_DATA  // = 134
+  SSH_ERR_KEY_INV_DATA,  // = 134
+  SSH_ERR_BUSY           // = 135
 };
 
 enum SshConnectionStates {

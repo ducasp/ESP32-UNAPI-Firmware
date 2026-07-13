@@ -70,10 +70,6 @@ v0.3
 #define HTTP_PACKET_SIZE 2048
 SET_LOOP_TASK_STACK_SIZE(65536); // 64KB stack — best balance for DRAM vs headroom
 WiFiClientSecure *TClient1;
-static char *g_caPem = NULL;
-static size_t g_caPemLen = 0;
-static uint8_t *g_caBundle = NULL;
-static size_t g_caBundleLen = 0;
 unsigned char bTLSInUse = 0;
 unsigned char uchTLSHost[256];
 bool bHasHostName = false;
@@ -135,10 +131,8 @@ static WiFiClient *stream = NULL;
 static unsigned int http_chunk_size = 0;
 static unsigned int http_chunk_header_idx = 0;
 static unsigned long longTimeOut2;
-uint8_t buffer[1024];
 static bool bRS232UpdateAllowed = false;
-static byte shaResult[32];
-static bool bShaOk = false;
+
 static bool bHTTPTransfer = false;
 
 // SSH globals
@@ -162,31 +156,25 @@ static uint8_t   sshPendingHash[4][SSH_KNOWN_HOST_HASH_SIZE];
 static bool      sshPendingHashValid[4]    = {false, false, false, false};
 static uint8_t   sshPendingAuthType[4];     // 0=pwd, 1=pubkey, 2=kbd-int, 3=anon
 static char      sshPendingUser[4][SSH_CRED_USER_MAX];
-static uint8_t   sshPendingSecret[4][SSH_CRED_SECRET_MAX];
-static uint16_t  sshPendingSecretLen[4];
+static uint8_t   sshPendingSecret[SSH_CRED_SECRET_MAX];
+static uint16_t  sshPendingSecretLen;
 static bool      sshPendingValid[4]         = {false, false, false, false};
 
 // SSH key pair management
 static ssh_key g_sshKeyPair = NULL;
 static bool    g_sshKeyLoaded = false;
 
-// Chunked export state
-static uint8_t *g_exportBuf = NULL;
+// Chunked export state — reads from FFat key files directly
+static File     g_exportFile;
 static size_t   g_exportLen = 0;
 static size_t   g_exportOff = 0;
-
-
-// Chunked import state
-static uint8_t *g_importBuf = NULL;
-static size_t   g_importLen = 0;
 
 // ======================== Helper Functions ========================
 void WaitConnectionIfNeeded(bool bFastReturn);
 void DisableRadio();
 void RadioUpdateStatus();
 void ScheduleTimeoutCheck();
-bool CacheCertificates();
-void CertificatesHash(size_t certsSize, unsigned char * certBuff);
+void CertificatesHash(size_t certsSize, const unsigned char *certBuff, byte shaResult[32]);
 
 static inline void wifiLedSet(bool on) {
 #ifdef USE_WIFI_LED
@@ -481,6 +469,22 @@ void setUartSpeed(){
   }
 }
 
+void deviceHealth() {
+  Serial.printf("Free_Heap: %u | Max_Block: %u\n", heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+  Serial.printf("FFAT - Free space: %lu Total FFAspace:%lu\n", (unsigned long)FFat.freeBytes(), (unsigned long)FFat.totalBytes());
+  File root = FFat.open("/");
+  File file = root.openNextFile();
+  while (file) {
+      if (!file.isDirectory()) {
+          Serial.print("FILE: ");
+          Serial.print(file.name());
+          Serial.print("\tSIZE: ");
+          Serial.println(file.size()); // File size in bytes
+      }
+      file = root.openNextFile();
+  }
+}
+
 void setup() {
   WiFi.persistent(true);
   EEPROM.begin(32);
@@ -493,6 +497,7 @@ void setup() {
   Serial.print(" ");
   Serial.println(FIRMWARETYPE);
   Serial.println("(c) 2019-2026 Oduvaldo Pavan Junior - ducasp@gmail.com");
+
   longReadyTimeOut = 0;
   btReadyRetries = 3;
   btReceivedCommand = false;
@@ -519,9 +524,7 @@ void setup() {
     FFat.begin(true);
   }
 
-  // Pre-allocate SSH transfer buffers once to avoid heap fragmentation
-  g_exportBuf = (uint8_t*)malloc(SSH_KEY_IMPORT_BUF_MAX);
-  g_importBuf = (uint8_t*)malloc(SSH_KEY_IMPORT_BUF_MAX);
+  // SSH transfer buffers are allocated on demand from FFat files
 
   sshInitKeyPair();
   initKnownHostsFile();
@@ -538,7 +541,7 @@ void setup() {
     // WPA2/WPA3 transition-mode APs, which is the most common cause of a
     // ~10-second 4-way handshake timeout when the password is otherwise correct.
     WiFi.setMinSecurity(WIFI_AUTH_WPA2_PSK);
-    WiFi.setTxPower(WIFI_POWER_15dBm);
+    //WiFi.setTxPower(WIFI_POWER_15dBm);
     bWiFiOn = true;
     if (!stDeviceConfiguration.ucAlwaysOn)
       ScheduleTimeoutCheck();
@@ -549,8 +552,8 @@ void setup() {
     bWiFiOn = false;
   }
   configTime(0,0, "pool.ntp.org");
-  CacheCertificates();
   libssh_begin();
+  deviceHealth();
   Serial.println("Ready");
 }
 
@@ -580,97 +583,59 @@ void RadioUpdateStatus () {
     WiFi.mode(WIFI_OFF);
 }
 
-void CertificatesHash(size_t certsSize, unsigned char * certBuff) {
+void CertificatesHash(size_t certsSize, const unsigned char *certBuff, byte shaResult[32]) {
   mbedtls_md_context_t ctx;
   mbedtls_md_type_t md_type = MBEDTLS_MD_SHA256;
 
   mbedtls_md_init(&ctx);
   mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(md_type), 0);
   mbedtls_md_starts(&ctx);
-  mbedtls_md_update(&ctx, (const unsigned char *) certBuff, certsSize);
+  mbedtls_md_update(&ctx, certBuff, certsSize);
   mbedtls_md_finish(&ctx, shaResult);
   mbedtls_md_free(&ctx);
-  bShaOk = true;
 }
 
-bool CacheCertificates() {
-  if (g_caPem != NULL)
-    free(g_caPem);
-  if (g_caBundle != NULL)
-    free(g_caBundle);
 
-  g_caPem = NULL;
-  g_caBundle = NULL;
-  g_caPemLen = 0;
-  g_caBundleLen = 0;
-
-  const char *pemPaths[] = {"/ca.pem", "/cacert.pem"};
-  for (size_t i = 0; i < (sizeof(pemPaths) / sizeof(pemPaths[0])); i++) {
-    File caFile = FFat.open(pemPaths[i], "r");
-    if (caFile) {
-      size_t size = caFile.size();
-      if (size > 0) {
-        char *buf = (char*)malloc(size + 1);
-        if (buf != NULL) {
-          size_t rd = caFile.readBytes(buf, size);
-          CertificatesHash(rd, (unsigned char*)buf);
-          buf[rd] = 0;
-          caFile.close();
-          g_caPem = buf;
-          g_caPemLen = rd;
-          return true;
-        }
-      }
-      caFile.close();
-    }
-  }
-
-  File bundle = FFat.open("/certs.bin", "r");
-  if (bundle) {
-    size_t size = bundle.size();
-    if (size > 0) {
-      uint8_t *buf = (uint8_t*)malloc(size);
-      if (buf != NULL) {
-        size_t rd = bundle.read(buf, size);
-        CertificatesHash(rd, (unsigned char*)buf);
-        bundle.close();
-        if (rd == size) {
-          g_caBundle = buf;
-          g_caBundleLen = size;
-          return true;
-        }
-        free(buf);
-      } else {
-        bundle.close();
-      }
-    } else {
-      bundle.close();
-    }
-  }
-  return false;
-}
 
 bool InitCertificates() {
-  CacheCertificates();
   setClock(); // Required for X.509 validation
-
   return true;
 }
 
-// Load CA certificates from FFat (FATFS)
-// Both cacert.pem and legacy certs.bin will work
-bool loadCACertForClient(WiFiClientSecure *client) {
-  if (g_caPem != NULL && g_caPemLen > 0) {
-    client->setCACert(g_caPem);
-    return true;
+// Load CA certificates from FFat (FATFS) on demand.
+// Both cacert.pem and legacy certs.bin will work.
+// Returns the allocated buffer set on the client (caller MUST free after connect()),
+// or NULL if no cert could be loaded.
+char *loadCACertForClient(WiFiClientSecure *client) {
+  const char *pemPaths[] = {"/ca.pem", "/cacert.pem"};
+  for (size_t i = 0; i < (sizeof(pemPaths) / sizeof(pemPaths[0])); i++) {
+    File f = FFat.open(pemPaths[i], "r");
+    if (!f) continue;
+    size_t size = f.size();
+    if (size == 0) { f.close(); continue; }
+    char *buf = (char*)malloc(size + 1);
+    if (!buf) { f.close(); continue; }
+    size_t rd = f.readBytes(buf, size);
+    f.close();
+    if (rd > 0) {
+      buf[rd] = 0;
+      client->setCACert(buf);
+      return buf;
+    }
+    free(buf);
   }
 
-  if (g_caBundle != NULL && g_caBundleLen > 0) {
-    client->setCACertBundle(g_caBundle, g_caBundleLen);
-    return true;
-  }
-
-  return false;
+  File b = FFat.open("/certs.bin", "r");
+  if (!b) return NULL;
+  size_t size = b.size();
+  if (size == 0) { b.close(); return NULL; }
+  uint8_t *buf = (uint8_t*)malloc(size);
+  if (!buf) { b.close(); return NULL; }
+  size_t rd = b.read(buf, size);
+  b.close();
+  if (rd != size) { free(buf); return NULL; }
+  client->setCACertBundle(buf, size);
+  return (char*)buf;
 }
 
 bool IsActivePortInUse (unsigned int uiPort) {
@@ -996,9 +961,9 @@ void WarmBoot() {
 }
 
 /**
- * Filters the SSH buffer in-place using a static carryover state machine.
+ * Filters the SSH buffer in-place using a non-destructive state machine.
  * Supports up to 4 concurrent connections (conn_id 1 to 4).
- * Skips invalid ANSI sequences by rewinding the write pointer (O(N) squeeze).
+ * Combines carryover safely at the front via a single memory shift, preserving heap stability.
  */
 void filter_ssh_buffer_inplace(uint8_t conn_id, uint8_t *buffer, int *length, bool reset = false) {
     // 1. Enforce bounds to prevent memory corruption (must be 1, 2, 3, or 4)
@@ -1006,22 +971,21 @@ void filter_ssh_buffer_inplace(uint8_t conn_id, uint8_t *buffer, int *length, bo
         return; 
     }
 
-    // 2. Create the persistent array of states for the 4 connections.
-    // They are automatically initialized to zero/false/STATE_TEXT on the first boot.
+    // 2. Persistent array of states for the 4 connections
     static SshFilterState connections[4];
 
-    // 3. Grab a reference to the specific connection's state block (offset by -1 for 0-indexing)
+    // 3. Grab a reference to the specific connection's state block
     SshFilterState &s = connections[conn_id - 1];
 
     // --- THE RESET BLOCK ---
     if (reset) {
-        s.carry_len = 0;
+        s.carry_len = 0; 
         s.state = STATE_TEXT;
         s.drop_sequence = false;
         s.is_extended_color = false;
         s.current_param = 0;
         s.prev_param = 0;
-        return; // Exit immediately
+        return; 
     }
 
     // Standard safety checks
@@ -1029,7 +993,8 @@ void filter_ssh_buffer_inplace(uint8_t conn_id, uint8_t *buffer, int *length, bo
         return;
     }
 
-    // Inject carryover from the previous split sequence for THIS connection
+    // INJECT CARRYOVER: Shift the new payload forward ONCE to clear space at the front.
+    // This hardware-accelerated move is instantaneous and prevents overwriting fresh network data.
     if (s.carry_len > 0) {
         memmove(buffer + s.carry_len, buffer, *length);
         memcpy(buffer, s.carryover, s.carry_len);
@@ -1040,19 +1005,22 @@ void filter_ssh_buffer_inplace(uint8_t conn_id, uint8_t *buffer, int *length, bo
     int read_idx = 0;
     int write_idx = 0;
     int input_len = *length;
-    int seq_start_idx = 0;
+    
+    // Tracks where the current escape sequence starts in the stream
+    int seq_start_offset = 0; 
 
+    // Pure linear sweep (O(N) complexity)
     while (read_idx < input_len) {
         uint8_t c = buffer[read_idx++];
-        
-        // Tentatively write every character.
+
+        // Commit every character directly to the clean output track
         buffer[write_idx++] = c;
 
         switch (s.state) {
             case STATE_TEXT:
-                if (c == 0x1B) {
+                if (c == 0x1B) { // ESC character detected
                     s.state = STATE_ESC;
-                    seq_start_idx = write_idx - 1;
+                    seq_start_offset = write_idx - 1; // Save exact stream position of ESC
                     s.drop_sequence = false;
                 }
                 break;
@@ -1068,23 +1036,21 @@ void filter_ssh_buffer_inplace(uint8_t conn_id, uint8_t *buffer, int *length, bo
                     s.state = STATE_SKIP_OSC;
                     s.drop_sequence = true;
                 } 
+                else if (c == '(' || c == ')') {
+                    // Drop VT100 character set commands instantly by rolling back the pointer
+                    write_idx = seq_start_offset;
+                    s.state = STATE_TEXT; 
+                }
                 else {
                     s.state = STATE_TEXT; 
                 }
                 break;
 
             case STATE_CSI:
-                // Drop sequences starting with '?' (private modes / alt-screen)
-                if (write_idx - seq_start_idx == 3 && c == '?') {
-                    s.drop_sequence = true;
-                }
-
-                // Integer parameter parsing
                 if (c >= '0' && c <= '9') {
                     s.current_param = (s.current_param * 10) + (c - '0');
                 } 
                 else if (c == ';') {
-                    // Check for strict truecolor/256-color patterns: 38;5, 48;5, 38;2, etc.
                     if ((s.prev_param == 38 || s.prev_param == 48 || s.prev_param == 58) && 
                         (s.current_param == 5 || s.current_param == 2)) {
                         s.is_extended_color = true;
@@ -1092,16 +1058,20 @@ void filter_ssh_buffer_inplace(uint8_t conn_id, uint8_t *buffer, int *length, bo
                     s.prev_param = s.current_param;
                     s.current_param = 0;
                 }
+                else if (c == '?') {
+                    s.drop_sequence = true;
+                }
 
-                // Sequence Termination (any letter 0x40 to 0x7E)
                 if (c >= 0x40 && c <= 0x7E) {
-                    // ONLY drop extended color codes if they terminate as graphic renditions ('m')
                     if (c == 'm' && s.is_extended_color) {
                         s.drop_sequence = true;
+                    } else if (c == 'm') {
+                        s.drop_sequence = false; // Never drop standard layout colors
                     }
 
                     if (s.drop_sequence) {
-                        write_idx = seq_start_idx; // SQUEEZE
+                        // Squeeze out unwanted color sequence safely by rolling back pointer
+                        write_idx = seq_start_offset; 
                     }
                     s.state = STATE_TEXT;
                 }
@@ -1109,46 +1079,41 @@ void filter_ssh_buffer_inplace(uint8_t conn_id, uint8_t *buffer, int *length, bo
 
             case STATE_SKIP_OSC:
                 if (c == 0x07) { 
-                    write_idx = seq_start_idx;
+                    write_idx = seq_start_offset; 
                     s.state = STATE_TEXT;
                 } 
                 else if (c == 0x1B) { 
-                    // Wait for ST (\x1b\) or BEL
                     s.state = STATE_OSC_EXPECT_ST;
                 }
                 break;
 
             case STATE_OSC_EXPECT_ST:
-                if (c == '\\') {
-                    // ST (\x1b\): drop entire OSC
-                    write_idx = seq_start_idx;
+                if (c == '\\' || c == 0x07) { 
+                    write_idx = seq_start_offset; 
                     s.state = STATE_TEXT;
-                } else if (c == 0x07) {
-                    // BEL-terminated OSC also valid here
-                    write_idx = seq_start_idx;
-                    s.state = STATE_TEXT;
-                } else if (c == 0x1B) {
-                    // Another ESC — stay in this state waiting for ST
-                } else {
-                    // Unexpected character — drop it and continue skipping OSC
+                } else if (c != 0x1B) {
                     s.state = STATE_SKIP_OSC;
                 }
                 break;
         }
     }
 
-    // Handle incomplete sequences at the chunk boundary
-    if (s.state != STATE_TEXT) {
-        s.carry_len = write_idx - seq_start_idx;
+    // If the network chunk ends while we are actively parsing an incomplete sequence
+    if (s.state != STATE_TEXT && write_idx > seq_start_offset) {
+        int incomplete_len = write_idx - seq_start_offset;
         
-        if (s.carry_len <= sizeof(s.carryover)) {
-            memcpy(s.carryover, buffer + seq_start_idx, s.carry_len);
+        if (incomplete_len <= (int)sizeof(s.carryover)) {
+            // Save the raw sequence bytes to be stitched into the front of the next chunk
+            memcpy(s.carryover, buffer + seq_start_offset, incomplete_len);
+            s.carry_len = incomplete_len;
         } else {
             s.carry_len = 0; 
         }
         
-        write_idx = seq_start_idx;
-        s.state = STATE_TEXT; 
+        // Trim the incomplete sequence from the current chunk output
+        write_idx = seq_start_offset;
+    } else {
+        s.carry_len = 0;
     }
 
     *length = write_idx;
@@ -1244,11 +1209,13 @@ static void sshFreeKeyPair() {
 }
 
 static void sshExportCleanup() {
+    if (g_exportFile) g_exportFile.close();
     g_exportLen = g_exportOff = 0;
 }
 
 static void sshImportCleanup() {
-    g_importLen = 0;
+    if (FFat.exists("/key_import.tmp"))
+        FFat.remove("/key_import.tmp");
 }
 
 // ======================== sshFinishSession ========================
@@ -1311,63 +1278,68 @@ static byte sshKeyExport(byte what, byte *buf, unsigned int maxSize,
     if (what > 2) return UNAPI_ERR_INV_PARAM;
 
     if (g_exportLen == 0) {
-        char *privPem = NULL;
-        char *pubB64 = NULL;
+        // Determine source file and total length on first call
+        const char *path = (what == 0) ? SSH_KEY_PRIV_FILE : SSH_KEY_PUB_FILE;
+        g_exportFile = FFat.open(path, "r");
+        if (!g_exportFile) return SSH_ERR_NO_KEY;
 
-        if (ssh_pki_export_privkey_base64(g_sshKeyPair, NULL, NULL, NULL, &privPem) != SSH_OK)
-            return SSH_ERR_NO_KEY;
-
-        ssh_key pubKey = NULL;
-        if (ssh_pki_export_privkey_to_pubkey(g_sshKeyPair, &pubKey) == SSH_OK) {
-            ssh_pki_export_pubkey_base64(pubKey, &pubB64);
-            ssh_key_free(pubKey);
-        }
-
-        size_t privLen = privPem ? strlen(privPem) : 0;
-        size_t pubLen  = pubB64  ? strlen(pubB64)  : 0;
-
-        if (what == 0) {
-            g_exportLen = privLen;
-        } else if (what == 1) {
-            const char *keyType = ssh_key_type_to_char(ssh_key_type(g_sshKeyPair));
-            size_t typeLen = strlen(keyType);
-            g_exportLen = typeLen + 1 + pubLen;
+        if (what == 2) {
+            // Both: need combined size of priv + 1 null + pub
+            File privF = FFat.open(SSH_KEY_PRIV_FILE, "r");
+            File pubF  = FFat.open(SSH_KEY_PUB_FILE, "r");
+            if (!privF || !pubF) {
+                if (privF) privF.close();
+                if (pubF)  pubF.close();
+                sshExportCleanup();
+                return SSH_ERR_NO_KEY;
+            }
+            g_exportLen = privF.size() + 1 + pubF.size();
+            privF.close(); pubF.close();
+            // Re-open priv file for reading; pub will be read after priv + null
+            g_exportFile.close();
+            g_exportFile = FFat.open(SSH_KEY_PRIV_FILE, "r");
         } else {
-            g_exportLen = privLen + 1 + pubLen;
+            g_exportLen = g_exportFile.size();
         }
-
-        g_exportBuf = (uint8_t*)malloc(g_exportLen + 1);
-        if (!g_exportBuf) {
-            if (privPem) ssh_string_free_char(privPem);
-            if (pubB64)  ssh_string_free_char(pubB64);
-            return SSH_ERR_NO_RSS;
-        }
-
-        if (what == 0) {
-            memcpy(g_exportBuf, privPem, privLen);
-        } else if (what == 1) {
-            const char *keyType = ssh_key_type_to_char(ssh_key_type(g_sshKeyPair));
-            size_t typeLen = strlen(keyType);
-            memcpy(g_exportBuf, keyType, typeLen);
-            g_exportBuf[typeLen] = ' ';
-            memcpy(g_exportBuf + typeLen + 1, pubB64, pubLen);
-        } else {
-            memcpy(g_exportBuf, privPem, privLen);
-            g_exportBuf[privLen] = 0;
-            if (pubLen) memcpy(g_exportBuf + privLen + 1, pubB64, pubLen);
-        }
-
-        if (privPem) ssh_string_free_char(privPem);
-        if (pubB64)  ssh_string_free_char(pubB64);
-
         g_exportOff = 0;
     }
 
     size_t remaining = g_exportLen - g_exportOff;
     size_t chunk = (remaining < maxSize) ? remaining : maxSize;
-    memcpy(buf, g_exportBuf + g_exportOff, chunk);
-    g_exportOff += chunk;
-    *written = (unsigned int)chunk;
+    size_t totalRead = 0;
+
+    // what == 2: first read priv, then a null separator, then pub
+    if (what == 2) {
+        size_t privSize = FFat.open(SSH_KEY_PRIV_FILE, "r").size();
+        if (g_exportOff < privSize) {
+            // Still in private key portion
+            g_exportFile.seek(g_exportOff);
+            int rd = g_exportFile.read(buf, chunk);
+            if (rd > 0) { totalRead = rd; g_exportOff += rd; }
+        } else if (g_exportOff == privSize) {
+            // Write the null separator byte
+            buf[0] = 0;
+            totalRead = 1;
+            g_exportOff++;
+            g_exportFile.close();
+        } else {
+            // Public key portion: offset within pub = g_exportOff - privSize - 1
+            if (!g_exportFile) {
+                g_exportFile = FFat.open(SSH_KEY_PUB_FILE, "r");
+                if (!g_exportFile) { sshExportCleanup(); return SSH_ERR_NO_KEY; }
+            }
+            size_t pubOff = g_exportOff - privSize - 1;
+            g_exportFile.seek(pubOff);
+            int rd = g_exportFile.read(buf, chunk);
+            if (rd > 0) { totalRead = rd; g_exportOff += rd; }
+        }
+    } else {
+        g_exportFile.seek(g_exportOff);
+        int rd = g_exportFile.read(buf, chunk);
+        if (rd > 0) { totalRead = rd; g_exportOff += rd; }
+    }
+
+    *written = (unsigned int)totalRead;
     *lastBlock = (g_exportOff >= g_exportLen) ? 1 : 0;
 
     if (*lastBlock) sshExportCleanup();
@@ -1375,25 +1347,36 @@ static byte sshKeyExport(byte what, byte *buf, unsigned int maxSize,
 }
 
 static byte sshKeyImport(byte lastBlock, byte *data, unsigned int dataLen) {
-    if (!g_importBuf) {
-        return SSH_ERR_NO_RSS;
-    }
-    if (g_importLen + dataLen > SSH_KEY_IMPORT_BUF_MAX) {
-        sshImportCleanup();
-        return UNAPI_ERR_BUFFER;
-    }
-    memcpy(g_importBuf + g_importLen, data, dataLen);
-    g_importLen += dataLen;
+    // Append this chunk to the temp file
+    File f = FFat.open("/key_import.tmp", FILE_APPEND);
+    if (!f) return SSH_ERR_NO_RSS;
+    size_t written = f.write(data, dataLen);
+    size_t totalSize = f.size();
+    f.close();
+    if (written != dataLen) { sshImportCleanup(); return SSH_ERR_NO_RSS; }
+    if (totalSize > SSH_KEY_IMPORT_BUF_MAX) { sshImportCleanup(); return UNAPI_ERR_BUFFER; }
 
     if (!lastBlock) return UNAPI_ERR_OK;
 
-    // Final chunk: parse complete private key PEM
+    // Final chunk: read entire file into temp buffer, validate, persist
+    File rf = FFat.open("/key_import.tmp", "r");
+    if (!rf) { sshImportCleanup(); return SSH_ERR_NO_RSS; }
+    size_t fileSize = rf.size();
+    if (fileSize == 0) { rf.close(); sshImportCleanup(); return SSH_ERR_KEY_INV_DATA; }
+
+    char *buf = (char*)malloc(fileSize + 1);
+    if (!buf) { rf.close(); sshImportCleanup(); return SSH_ERR_NO_RSS; }
+    size_t rd = rf.read((uint8_t*)buf, fileSize);
+    rf.close();
+    if (rd != fileSize) { free(buf); sshImportCleanup(); return SSH_ERR_NO_RSS; }
+    buf[fileSize] = '\0';
+
     ssh_key newKey = NULL;
-    int rc = ssh_pki_import_privkey_base64((const char*)g_importBuf, NULL, NULL, NULL, &newKey);
-    if (rc != SSH_OK) {
-        sshImportCleanup();
-        return SSH_ERR_KEY_INV_DATA;
-    }
+    int rc = ssh_pki_import_privkey_base64(buf, NULL, NULL, NULL, &newKey);
+    free(buf);
+
+    if (rc != SSH_OK) { sshImportCleanup(); return SSH_ERR_KEY_INV_DATA; }
+
     if (!sshSaveKeyPair(newKey)) {
         ssh_key_free(newKey);
         sshImportCleanup();
@@ -1402,7 +1385,7 @@ static byte sshKeyImport(byte lastBlock, byte *data, unsigned int dataLen) {
     if (g_sshKeyPair) ssh_key_free(g_sshKeyPair);
     g_sshKeyPair = newKey;
     g_sshKeyLoaded = true;
-    sshImportCleanup();
+    FFat.remove("/key_import.tmp");
     return UNAPI_ERR_OK;
 }
 
@@ -1485,6 +1468,11 @@ static byte sshOpen(byte *params, unsigned int paramLen, byte *outConnNum) {
     if (authLen == 0) return UNAPI_ERR_INV_PARAM;
   }
 
+  // Reject if another connection is pending host key approval
+  for (byte i = 0; i < 4; i++) {
+    if (sshPendingValid[i]) return SSH_ERR_BUSY;
+  }
+
   // Find free slot
   byte slot;
   for (slot = 0; slot < 4; slot++)
@@ -1522,29 +1510,29 @@ static byte sshOpen(byte *params, unsigned int paramLen, byte *outConnNum) {
     if (ssh_get_server_publickey(session, &key) == SSH_OK) {
       if (ssh_get_publickey_hash(key, SSH_PUBLICKEY_HASH_SHA256, &hash, &hlen) == SSH_OK && hlen == SSH_KNOWN_HOST_HASH_SIZE) {
         if (!isHostKnown(hash)) {
-          // Save credentials for SSH_ADD_KNOWN_HOST resume
+          // Save credentials for SSH_ADD_KNOWN_HOST resume (shared buffer)
           if (useKbdInt) {
             sshPendingAuthType[slot] = 2;
             strncpy(sshPendingUser[slot], (const char*)&params[userOff], SSH_CRED_USER_MAX - 1);
             sshPendingUser[slot][SSH_CRED_USER_MAX - 1] = '\0';
-            sshPendingSecretLen[slot] = 0;
+            sshPendingSecretLen = 0;
           } else if (usePubKey) {
             sshPendingAuthType[slot] = 1;
             strncpy(sshPendingUser[slot], (const char*)&params[userOff], SSH_CRED_USER_MAX - 1);
             sshPendingUser[slot][SSH_CRED_USER_MAX - 1] = '\0';
-            sshPendingSecretLen[slot] = 0;
+            sshPendingSecretLen = 0;
           } else if (!anonymousConnection) {
             sshPendingAuthType[slot] = 0;
             strncpy(sshPendingUser[slot], (const char*)&params[userOff], SSH_CRED_USER_MAX - 1);
             sshPendingUser[slot][SSH_CRED_USER_MAX - 1] = '\0';
             unsigned int authDataLen = authLen < SSH_CRED_SECRET_MAX ? authLen : SSH_CRED_SECRET_MAX - 1;
-            memcpy(sshPendingSecret[slot], &params[authOff], authDataLen);
-            sshPendingSecret[slot][authDataLen] = '\0';
-            sshPendingSecretLen[slot] = authDataLen;
+            memcpy(sshPendingSecret, &params[authOff], authDataLen);
+            sshPendingSecret[authDataLen] = '\0';
+            sshPendingSecretLen = authDataLen;
           } else {
             sshPendingAuthType[slot] = 3;
             sshPendingUser[slot][0] = '\0';
-            sshPendingSecretLen[slot] = 0;
+            sshPendingSecretLen = 0;
           }
           sshPendingValid[slot] = true;
           memcpy(sshPendingHash[slot], hash, SSH_KNOWN_HOST_HASH_SIZE);
@@ -1645,7 +1633,7 @@ static byte sshAddKnownHost(byte connNum) {
     if (ssh_userauth_publickey(session, NULL, g_sshKeyPair) != SSH_AUTH_SUCCESS)
       goto fail_cleanup;
   } else if (authType == 0) {
-    if (ssh_userauth_password(session, NULL, (const char*)sshPendingSecret[slot]) != SSH_AUTH_SUCCESS) {
+    if (ssh_userauth_password(session, NULL, (const char*)sshPendingSecret) != SSH_AUTH_SUCCESS) {
       goto fail_cleanup;
     }
   } else if (authType == 3) {
@@ -1696,6 +1684,7 @@ static byte sshClose(byte connNum) {
   sshChallengeDataLen[slot] = 0;
   sshPendingHashValid[slot] = false;
   sshPendingValid[slot] = false;
+  sshPendingSecretLen = 0;
   btConnections[slot] = CONN_CLOSED;
   return UNAPI_ERR_OK;
 }
@@ -2056,9 +2045,6 @@ void received_data_parser () {
               if (FFat.exists(targetPath)) FFat.remove(targetPath);
               if (FFat.rename("/cert_upload.tmp", targetPath))
               {
-                // Drop in-memory cached certs so loadCACertForClient() reloads
-                if (g_caPem)    { free(g_caPem);    g_caPem = NULL;    g_caPemLen = 0; }
-                if (g_caBundle) { free(g_caBundle); g_caBundle = NULL; g_caBundleLen = 0; }
                 SendQuickResponse(btCommand, UNAPI_ERR_OK);
                 // No ESP.restart() — cert update is hot-applied.
               }
@@ -2259,6 +2245,10 @@ void received_data_parser () {
             stDeviceConfiguration.ucNagle = 1;
             saveFileConfig();
             SendQuickResponse(btCommand,UNAPI_ERR_OK);
+          break;
+
+          case CUSTOM_F_DEVHEALTH:
+            deviceHealth();
           break;
 
           case TCPIP_HTTP_OPEN:
@@ -2595,6 +2585,21 @@ proccesscmd:
                     SendQuickResponse(btCommand,UNAPI_ERR_NO_DATA);
                 } else {
                   // lets simply download the cert file
+                  // Compute hash from the current cert file on FFat
+                  byte shaResult[32] = {0};
+                  const char *certPaths[] = {"/ca.pem", "/cacert.pem", "/certs.bin"};
+                  for (size_t ci = 0; ci < 3; ci++) {
+                    File cf = FFat.open(certPaths[ci], "r");
+                    if (!cf) continue;
+                    size_t cs = cf.size();
+                    if (cs == 0) { cf.close(); continue; }
+                    uint8_t *cbuf = (uint8_t*)malloc(cs);
+                    if (!cbuf) { cf.close(); continue; }
+                    size_t cr = cf.read(cbuf, cs);
+                    cf.close();
+                    if (cr == cs) { CertificatesHash(cr, cbuf, shaResult); free(cbuf); break; }
+                    free(cbuf);
+                  }
                   stOTAFile="/index.php?type=CERTS&hash=";
                   char shaBuff[3];
                   for (int iHashByte = 0; iHashByte < 32; ++iHashByte) {
@@ -2615,8 +2620,8 @@ proccesscmd:
                       while (http.connected() && (http.getSize() > 0 || http.getSize() == -1)) {
                           size_t size = stream->available();
                           if (size) {
-                              int c = stream->readBytes(buffer, ((size > sizeof(buffer)) ? sizeof(buffer) : size));
-                              g_certUploadFile.write(buffer, c);
+                              int c = stream->readBytes(btCommandData, ((size > MAX_CMD_DATA_LEN) ? MAX_CMD_DATA_LEN : size));
+                              g_certUploadFile.write(btCommandData, c);
                           }
                       }
                       g_certUploadFile.close();
@@ -2635,9 +2640,6 @@ proccesscmd:
                         if (FFat.exists(ttargetPath)) FFat.remove(ttargetPath);
                         if (FFat.rename("/cert_upload.tmp", ttargetPath))
                         {
-                          // Drop in-memory cached certs so loadCACertForClient() reloads
-                          if (g_caPem)    { free(g_caPem);    g_caPem = NULL;    g_caPemLen = 0; }
-                          if (g_caBundle) { free(g_caBundle); g_caBundle = NULL; g_caBundleLen = 0; }
                           SendQuickResponse(btCommand, UNAPI_ERR_OK);
                           // No ESP.restart() — cert update is hot-applied.
                         }
@@ -3117,8 +3119,9 @@ proccesscmd:
                     TClient1 = (WiFiClientSecure*)ClientList[uiForHelper];
                     ClientList[uiForHelper]->setNoDelay(!stDeviceConfiguration.ucNagle);
 
+                    char *certBuf = NULL;
                     if (btCMDPassive&8) //validate certificates?
-                       loadCACertForClient(TClient1);
+                      certBuf = loadCACertForClient(TClient1);
                     else
                       TClient1->setInsecure();
 
@@ -3126,6 +3129,9 @@ proccesscmd:
                       btCMDBeginRet = TClient1->connect((const char*)uchTLSHost, uiCMDRemotePort);
                     else
                       btCMDBeginRet = TClient1->connect(externalIP,uiCMDRemotePort);
+
+                    if (certBuf)
+                      free(certBuf);
   
                     if (btCMDBeginRet)
                     {

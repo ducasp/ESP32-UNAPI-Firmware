@@ -66,6 +66,14 @@ v0.3
 #include <base64.h>
 #include <esp_wifi.h>
 #include <lwip/sockets.h>
+#include <lwip/tcp.h>
+#include <lwip/api.h>
+// sockets_priv.h declares lwip_socket_dbg_get_socket() outside extern "C",
+// so we forward-declare it ourselves with correct C linkage.
+struct lwip_sock {
+  struct netconn *conn;
+};
+extern "C" struct lwip_sock *lwip_socket_dbg_get_socket(int fd);
 
 #define HTTP_PACKET_SIZE 2048
 SET_LOOP_TASK_STACK_SIZE(65536); // 64KB stack — best balance for DRAM vs headroom
@@ -698,6 +706,13 @@ void CheckPassiveLocalPort (unsigned int *lpuiPort) {
   }
 }
 
+byte getTcpLwipState(int sockfd) {
+  if (sockfd < 0) return 0;
+  struct lwip_sock *sock = lwip_socket_dbg_get_socket(sockfd);
+  if (!sock || !sock->conn || !sock->conn->pcb.tcp) return 0;
+  return (byte)(sock->conn->pcb.tcp->state);
+}
+
 void CloseUdpConnection (byte btConnNumber) {
   switch (btConnNumber)
   {
@@ -842,40 +857,51 @@ void TcpSend(byte btCMDConnNumber,byte *btCommandData,unsigned int uiCmdDataLen)
 
 void TcpState(byte btCMDConnNumber)
 {
+  int sockfd;
   size_t availableBytes;
-  byte btStatus;
   unsigned char ucResponse[16];
   memset (ucResponse,0,sizeof(ucResponse));
 
-  if (btConnections[btCMDConnNumber-1] == CONN_TCP_TLS_A)
+  if (btConnections[btCMDConnNumber-1] == CONN_TCP_PASSIVE)
   {
-    if (ClientList[btCMDConnNumber-1]->connected())
-      ucResponse[0] = 1; //It is a flag indicating it is TLS connection
-    else
+    if (ServerList[btCMDConnNumber-1] == NULL)
     {
-      //TODO: can check real error instead of returning TLS other?
-      ucResponse[0] = 19;
+      SendResponse (TCPIP_TCP_STATE, UNAPI_ERR_NO_CONN, 0, 0);
+      return;
+    }
+    if (ClientList[btCMDConnNumber-1] == NULL)
+    {
+      ucResponse[1] = 1; //LISTEN
+      ucResponse[14]=(unsigned char)(uiLocalPorts[btCMDConnNumber-1]&0xff);
+      ucResponse[15]=(unsigned char)((uiLocalPorts[btCMDConnNumber-1]>>8)&0xff);
+      SendResponse (TCPIP_TCP_STATE, UNAPI_ERR_OK, 16, ucResponse);
+      return;
     }
   }
 
-  if (ClientList[btCMDConnNumber-1]!=NULL)
+  if ((btConnections[btCMDConnNumber-1] == CONN_TCP_ACTIVE) ||
+      (btConnections[btCMDConnNumber-1] == CONN_TCP_TLS_A) ||
+      (btConnections[btCMDConnNumber-1] == CONN_TCP_PASSIVE))
   {
-    if (ClientList[btCMDConnNumber-1]->available()==0)
+    if (ClientList[btCMDConnNumber-1] == NULL)
     {
-      btStatus=ClientList[btCMDConnNumber-1]->connected() ? 4 : 0;
-      if (btStatus==0)
-        btStatus=7; //ESP8266 Wificlass go to 0 once remote end disconnects, this can lead UNAPI apps go nuts
-      ucResponse[1]=btStatus; //Connection State
+      SendResponse (TCPIP_TCP_STATE, UNAPI_ERR_NO_CONN, 0, 0);
+      return;
     }
-    else
-      ucResponse[1]=4; //Connection State forced to stablished when still there is data
-    ucResponse[2]=(unsigned char)(ClientList[btCMDConnNumber-1]->available()&0xff); //Incoming bytes available LSB
-    ucResponse[3]=(unsigned char)((ClientList[btCMDConnNumber-1]->available()>>8)&0xff); //Incoming bytes available MSB
+
+    if (btConnections[btCMDConnNumber-1] == CONN_TCP_TLS_A)
+      ucResponse[0] = 1; //TLS connection flag
+
+    sockfd = ClientList[btCMDConnNumber-1]->fd();
+    ucResponse[1] = getTcpLwipState(sockfd); //Connection State from lwip
+
+    ucResponse[2]=(unsigned char)(ClientList[btCMDConnNumber-1]->available()&0xff);
+    ucResponse[3]=(unsigned char)((ClientList[btCMDConnNumber-1]->available()>>8)&0xff);
     availableBytes = ClientList[btCMDConnNumber-1]->availableForWrite();
     if (availableBytes>2048)
-      availableBytes = 2048; //We can receive only up to 2048 in a single command
-    ucResponse[6]=(unsigned char)(availableBytes&0xff); //Free space in buffer LSB
-    ucResponse[7]=(unsigned char)((availableBytes>>8)&0xff); //Free space in buffer MSB
+      availableBytes = 2048;
+    ucResponse[6]=(unsigned char)(availableBytes&0xff);
+    ucResponse[7]=(unsigned char)((availableBytes>>8)&0xff);
     if (btCMDConnNumber==1)
       memcpy(&ucResponse[8],btIPConnection1,4);
     else if (btCMDConnNumber==2)
@@ -889,22 +915,10 @@ void TcpState(byte btCMDConnNumber)
     ucResponse[14]=(unsigned char)(uiLocalPorts[btCMDConnNumber-1]&0xff);
     ucResponse[15]=(unsigned char)((uiLocalPorts[btCMDConnNumber-1]>>8)&0xff);
     SendResponse (TCPIP_TCP_STATE, UNAPI_ERR_OK, 16, ucResponse);
-  }
-  else if (btConnections[btCMDConnNumber-1] == CONN_TCP_PASSIVE)
-  {
-    // Here we can either say Listen (1) or Stablished (4)
-    // If there is a client, it is stablished, otherwise, listening
-    ucResponse[1] = ClientList[btCMDConnNumber-1] != NULL ? 4 : 1; //Connection State
-    ucResponse[14]=(unsigned char)(uiLocalPorts[btCMDConnNumber-1]&0xff);
-    ucResponse[15]=(unsigned char)((uiLocalPorts[btCMDConnNumber-1]>>8)&0xff);
-    SendResponse (TCPIP_TCP_STATE, UNAPI_ERR_OK, 16, ucResponse);
     return;
   }
-  else
-  {
-    SendResponse (TCPIP_TCP_STATE, UNAPI_ERR_NO_CONN, 0, 0);
-    return;
-  }
+
+  SendResponse (TCPIP_TCP_STATE, UNAPI_ERR_NO_CONN, 0, 0);
 }
 
 void TcpReceive (byte btCMDConnNumber, uint16_t ui16RcvSize, byte * btCommandData) {

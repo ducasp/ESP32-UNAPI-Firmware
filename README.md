@@ -34,6 +34,14 @@ https://github.com/espressif/esp-idf/blob/master/components/mbedtls/esp_crt_bund
 To get the certificates in a single bundle file. That file you can rename to certs.bin and then upload
 it to ESP using a tool like CFGESP / UPDTESP locally or through a web server.
 
+*** NOTE ***
+Google and some other hosts have certificates cross-signed with old and considered unreliable certificates from globalsign, they do this
+for legacy devices that have not been updated, and most modern stuff understand the cross-signing and bypass the old cert and go to the
+new cert, unfortunately mBED TLS, that is the base for this development, doesn't work well. To work around this until mBED TLS and Arduino
+IDE core builds get an update, you can either use unsecure https connection OR download GlobalSign Root R1 certificate from
+https://www.globalsign.com/pt-br/repository, convert it from CRT to PEM using openssl x509 -in Root-R1.crt -inform DER -out Root-R1.pem -outform PEM
+and then you can just open the Root-R1.pem and add to the certificate list you got from curl.se...
+
 # Project Design Constraints
 
 This firmware was designed taking into consideration that the other end connected to it either has

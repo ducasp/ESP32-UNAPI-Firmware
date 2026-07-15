@@ -3135,7 +3135,11 @@ proccesscmd:
 
                     char *certBuf = NULL;
                     if (btCMDPassive&8) //validate certificates?
+                    {
+                      if (!bSNTPOK)
+                        setClock();
                       certBuf = loadCACertForClient(TClient1);
+                    }
                     else
                       TClient1->setInsecure();
 

@@ -55,6 +55,11 @@ enum SupportedBaudRates {
   BR859372 = 7
 };
 
+//Minimum free heap (8 bit capable) required to accept a new TLS connection.
+//The resident CA certificate/bundle is used by pointer (no per-connection
+//copy), so it is intentionally not added to this requirement.
+#define TLS_MIN_FREE_HEAP (48 * 1024)
+
 //Uncomment ONLY the ESP Model you are targetting
 #define ESP32_C6
 //#define ESP32_S3

@@ -49,6 +49,13 @@ struct ESPConfig {
   int iGMT;
   unsigned char ucBaudRate;
   unsigned char ucAutoUpdateFH;
+  unsigned char ucIPAutomatic;
+  unsigned char ucDNSAutomatic;
+  unsigned char ucManualLocalIP[4];
+  unsigned char ucManualGateway[4];
+  unsigned char ucManualMask[4];
+  unsigned char ucManualDNS1[4];
+  unsigned char ucManualDNS2[4];
 };
 
 enum CommandTypes {
@@ -110,6 +117,12 @@ enum CustomFunctions {
   CUSTOM_F_GETAPSTS = 'g',
   CUSTOM_F_DEVHEALTH = 'w',
   CUSTOM_F_QUERY = '?'
+};
+
+// Vendor private commands, not part of the TCP-IP UNAPI specification
+// (0x7F to 0xFF is reserved for these and SSH UNAPI commands)
+enum CustomVendorFunctions {
+  CUSTOM_F_UDP_STATEX = 210 //Non destructive UDP datagram peek
 };
 
 // MUST NEVER GO BEYOND 33 for standard TCP-IP UNAPI functions

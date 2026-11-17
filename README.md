@@ -18,6 +18,12 @@ https://github.com/ducasp/MSX-Development/tree/master/UPDTESP
 
 You will need Arduino IDE and install ESP32 Arduino IDE and LibSSH-ESP32
 
+The UDP_STATE/UDP_STATEX routines need a small addition to the ESP32 Arduino core
+Network library (a socket descriptor accessor in NetworkUdp.h) so the firmware can
+peek datagrams without consuming them. Apply the change documented in the
+Arduino-ESP32-Core-Modifications folder before building, otherwise compilation
+will fail at the UdpX.fd() calls by design.
+
 I STRONGLY RECOMMEND that you stick to LibSSH-ESP32 5.8.0 and update it with the changed files in the LibSSH-ESP32-Modifications folder,
 those changes greatly reduce memory heap fragmentation and allow stable SSH connections for really long periods.
 

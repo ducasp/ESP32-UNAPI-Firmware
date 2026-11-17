@@ -17,32 +17,33 @@ Copyright (c) 2019 - 2026 Oduvaldo Pavan Junior ( ducasp@ gmail.com ) All rights
       2. [Warm Reset](#cwreset)
       3. [Query](#cquery)
       4. [Get Version](#cgetver)
-      5. [Retry Transmission](#cretry)
-      6. [Scan Available Access Points](#cscans)
-      7. [Scan Available Access Points Results](#cscanr)
-      8. [Connect to Access Point](#cconnectap)
-      9. [Get Access Point Status](#cgetapsts)
-      10. [Update Firmware Over the Air](#cotafwupdt)
-      11. [Update Certificates Over the Air](#cotacertupdt)
-      12. [Start Local Firmware Update](#clocalfwupdt)
-      13. [Start Local Certificate Update](#clocalcertupdt)
-      14. [Write Block](#clocalwriteblock)
-      15. [Finish Local Update](#clocalfinish)
-      16. [Initialize Certificates](#cinitcerts)
-      17. [Disable Nagle Algorithm](#cnagledis)
-      18. [Enable Nagle Algorithm](#cnagleen)
-      19. [Set Radio Off Time-Out](#cradiotimeout)
-      20. [Disable Radio](#cradiodisable)
-      21. [Get Settings](#cgetset)
-      22. [Get Auto Clock Settings](#cgetaclkset)
-      23. [Set Auto Clock Settings](#csetaclkset)
-      24. [Get Date and Time](#cgetdate)
-      25. [Hold Connection](#choldconn)
-      26. [Release Connection](#creleaseconn)
-      27. [Turn Wi-Fi Off](#cturnwifioff)
-      28. [Turn RS232 Off](#cturnrs232off)
-       29. [Clear AP from memory](#cclearap)
-       30. [Device Health](#cdevhealth)
+      5. [Get Board](#cgetboard)
+      6. [Retry Transmission](#cretry)
+      7. [Scan Available Access Points](#cscans)
+      8. [Scan Available Access Points Results](#cscanr)
+      9. [Connect to Access Point](#cconnectap)
+      10. [Get Access Point Status](#cgetapsts)
+      11. [Update Firmware Over the Air](#cotafwupdt)
+      12. [Update Certificates Over the Air](#cotacertupdt)
+      13. [Start Local Firmware Update](#clocalfwupdt)
+      14. [Start Local Certificate Update](#clocalcertupdt)
+      15. [Write Block](#clocalwriteblock)
+      16. [Finish Local Update](#clocalfinish)
+      17. [Initialize Certificates](#cinitcerts)
+      18. [Disable Nagle Algorithm](#cnagledis)
+      19. [Enable Nagle Algorithm](#cnagleen)
+      20. [Set Radio Off Time-Out](#cradiotimeout)
+      21. [Disable Radio](#cradiodisable)
+      22. [Get Settings](#cgetset)
+      23. [Get Auto Clock Settings](#cgetaclkset)
+      24. [Set Auto Clock Settings](#csetaclkset)
+      25. [Get Date and Time](#cgetdate)
+      26. [Hold Connection](#choldconn)
+      27. [Release Connection](#creleaseconn)
+      28. [Turn Wi-Fi Off](#cturnwifioff)
+      29. [Turn RS232 Off](#cturnrs232off)
+       30. [Clear AP from memory](#cclearap)
+       31. [Device Health](#cdevhealth)
     2. [UNAPI Commands](#ucommands)
       1. [TCPIP_GET_CAPAB](#cugetcapab)
       2. [TCPIP_GET_IPINFO](#cugetipinfo)
@@ -90,6 +91,8 @@ Copyright (c) 2019 - 2026 Oduvaldo Pavan Junior ( ducasp@ gmail.com ) All rights
         13. [SSH_KEY_EXPORT](#cusshkeyexport)
         14. [SSH_KEY_IMPORT](#cusshkeyimport)
         15. [SSH_KEY_INFO](#cusshkeyinfo)
+     4. [Vendor Commands](#uvendorcommands)
+        1. [UDP_STATEX](#cuudpstatex)
 
 
 ## <a name="goals"></a> Introduction / Design Choices - Goals
@@ -163,21 +166,31 @@ If no response data is expected for that command:
 
 ## <a name="config"></a> Configurations / Behavior Modifiers
 
-This firmware uses ESP32 Arduino IDE EEPROM functionality, that uses part of the flash memory that is not affected during firmware or file system updates to store a few bytes of data. 32 bytes of flash memory are reserved for this firmware, that are used as follow:
+This firmware uses ESP32 Arduino IDE EEPROM functionality, that uses part of the flash memory that is not affected during firmware or file system updates to store a few bytes of data. 64 bytes of flash memory are reserved for this firmware, that are used as follow (offsets are the actual structure layout, including compiler padding):
 
 | EEPROM Address(es) | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Default Value                    |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------- |
 | 0 to 7             | Configuration File Name: this is mostly to indicate whether the EEPROM has already been initialized or not, if not containing the expected string (that is not zero terminated), firmware will consider it will need to initialize EEPROM and device configuration to default values.                                                                                                                                                                                                      | "ESPUNAPI"                       |
-| 8                  | Structure Version: this identifies which structure of data has been saved to the EEPROM, if an older version if found, a newer one with the extra configurations is generated, using the default values.                                                                                                                                                                                                                                                                                   | 2                                |
+| 8                  | Structure Version: this identifies which structure of data has been saved to the EEPROM, if an older version if found, a newer one with the extra configurations is generated, using the default values.                                                                                                                                                                                                                                                                                   | 4                                |
 | 9                  | Nagle Algorithm: tells whether Nagle Algorithm is off (0) or on (1).                                                                                                                                                                                                                                                                                                                                                                                                                       | 0                                |
 | 10                 | Always On: tells whether Wi-Fi radio is always on (1) or if it will be automatically disabled after a given period (0).                                                                                                                                                                                                                                                                                                                                                                    | 0                                |
-| 11-14              | Radio Off Timer: 32 bits unsigned integer containing the time in seconds that need to elapse with the device idle and without open connections before turning off the Wi-Fi radio automatically. Only taken into consideration if Always On is set to 0.                                                                                                                                                                                                                                   | 120                              |
-| 15                 | Auto Clock: this is a byte that the ROM version of the driver uses to determine a few of its behavior. Current possible values are: (0) Normal Operation but do not set clock automatically, (1) Will wait up to 10s for SNTP server response during computer boot and if a response is received will to update the system time and date with SNTP information, (2) Same as 1 but will turn off the Wi-Fi radio as soon as clock is set and (3) Will disable Wi-Fi radio and UNAPI Driver. | 0                                |
-| 16-19              | GMT Setting: 32 bits integer that allows to add a GMT offset from -12 to +12 hours to the time and date response from the SNTP server. Only full hour adjustment is supported.                                                                                                                                                                                                                                                                                                             | -3 (Brazil - Brasilia time zone) |
-| 20                 | File Hunter Auto Update: this sets whether firmware and certificates can be automatically updated without user interference. Reserved for future used                                                                                                                                                                                                                                                                                                                                      | 0                                |
-| 21-31              | Unused                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | ?                                |
+| 11                 | Unused (compiler padding)                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | ?                                |
+| 12-15              | Radio Off Timer: 32 bits unsigned integer containing the time in seconds that need to elapse with the device idle and without open connections before turning off the Wi-Fi radio automatically. Only taken into consideration if Always On is set to 0.                                                                                                                                                                                                                                   | 120                              |
+| 16                 | Auto Clock: this is a byte that the ROM version of the driver uses to determine a few of its behavior. Current possible values are: (0) Normal Operation but do not set clock automatically, (1) Will wait up to 10s for SNTP server response during computer boot and if a response is received will to update the system time and date with SNTP information, (2) Same as 1 but will turn off the Wi-Fi radio as soon as clock is set and (3) Will disable Wi-Fi radio and UNAPI Driver. | 0                                |
+| 17-19              | Unused (compiler padding)                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | ?                                |
+| 20-23              | GMT Setting: 32 bits integer that allows to add a GMT offset from -12 to +12 hours to the time and date response from the SNTP server. Only full hour adjustment is supported.                                                                                                                                                                                                                                                                                                             | -3 (Brazil - Brasilia time zone) |
+| 24                 | UART Baud Rate (index, see ESP32BOARDS.h)                                                                                                                                                                                                                                                                                                                                                                                                                                                  | ESP32BAUDRATE                    |
+| 25                 | File Hunter Auto Update: this sets whether firmware and certificates can be automatically updated without user interference. Reserved for future used                                                                                                                                                                                                                                                                                                                                      | 0                                |
+| 26                 | IP Automatic: 1 = local IP address, subnet mask and gateway are automatically retrieved (DHCP), 0 = manually configured                                                                                                                                                                                                                                                                                                                                                                     | 1                                |
+| 27                 | DNS Automatic: 1 = DNS servers are automatically retrieved, 0 = manually configured                                                                                                                                                                                                                                                                                                                                                                                                         | 1                                |
+| 28-31              | Manual Local IP Address                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | 0.0.0.0                          |
+| 32-35              | Manual Gateway Address                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | 0.0.0.0                          |
+| 36-39              | Manual Subnet Mask                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | 0.0.0.0                          |
+| 40-43              | Manual Primary DNS Server                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | 0.0.0.0                          |
+| 44-47              | Manual Secondary DNS Server                                                                                                                                                                                                                                                                                                                                                                                                                                                                | 0.0.0.0                          |
+| 48-63              | Unused                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | ?                                |
 
-**Note:** IP Configuration (whether it is set to use DHCP or manual IP assignment) and DNS configuration (whether it is automatic from DHCP or force a different DNS server to be used) are saved within ESPRESSIF nonos SDK automatically, not needing to be saved in the configuration structure.
+**Note:** The network stack does not persist static IP addresses or DNS servers on its own (only the Wi-Fi credentials are persisted), so the automatic/manual flags and the manually configured addresses are saved in the configuration structure and re-applied at boot.
 
 ## <a name="commands"></a> Commands
 
@@ -257,6 +270,27 @@ This command will return the firmware version.
 | 0        | CMD_BYTE      | 'V'   |
 | 1        | Version Major | 1     |
 | 2        | Version Minor | 3     |
+
+#### <a name="cgetboard"></a> Get Board
+
+This command will return the board identification string, that identifies the module type and the flash memory size the firmware was built for.
+
+*Input Parameters:* none
+
+*Command Structure:*
+
+| Position | Function | Value |
+|:--------:|:-------- |:----- |
+| 0        | CMD_BYTE | 'b'   |
+
+*Response Structure:*
+
+| Position | Function      | Value                                                             |
+|:--------:| ------------- | ----------------------------------------------------------------- |
+| 0        | CMD_BYTE      | 'b'                                                               |
+| 1        | Error Code    | 0 - always Ok                                                     |
+| 2 - 3    | Response Size | 16 bits value (MSB LSB) indicating the size of the response       |
+| 4 - X    | Board ID      | Board identification string, NULL (0) terminated, i.e. "UN32C616" |
 
 #### <a name="cretry"></a> Retry Transmission
 
@@ -1454,6 +1488,17 @@ Connection parameters:
 
 This command will allow to check or set the automatic IP retrieval options.
 
+The configuration byte has the following meaning: bit 0 = automatically retrieve the local IP address, subnet mask and default gateway; bit 1 = automatically retrieve the DNS servers addresses. Bits 2-7 are unused and must be zero.
+
+Configuration value 2 (IP addresses manual + DNS servers automatic) is **not supported**: DNS servers can only be obtained automatically when the IP addresses are also obtained automatically (DHCP), as the network stack offers no way to run a DHCP client only for the DNS options while keeping a static IP. Trying to set it returns error code 4 (invalid parameters). The configuration byte is only validated when the action is "set"; Get ignores it. Get never returns 2, and a value of 2 stored by an intermediate build is normalized to 3 at boot.
+
+Notes:
+- Switching the IP group from manual to automatic restarts DHCP, so new addresses are obtained.
+- Switching the IP group from automatic to manual freezes the currently obtained addresses as the manual configuration.
+- Switching the DNS group from automatic to manual adopts the currently in use DNS servers as the manual ones. Switching from manual to automatic makes the DHCP client provide them again: if the IP group is already automatic, the firmware performs a quick Wi-Fi reconnection to obtain a new lease immediately (open connections are closed); otherwise the DHCP cycle started by the IP group transition obtains them.
+- While the IP group is automatic, a DHCP lease renewal may replace manually configured DNS servers; the firmware re-applies them whenever the Wi-Fi connection is (re)established.
+- The automatic/manual flags and the manual addresses are saved to the EEPROM configuration and restored at boot.
+
 *Input Parameters:* 
 
 Connection parameters:
@@ -1484,6 +1529,12 @@ Connection parameters:
 #### <a name="cucfgip"></a> TCPIP_CONFIG_IP
 
 This command will configure manually a given IP address.
+
+Notes:
+- The supplied values are always stored in the EEPROM configuration, even when the corresponding group is currently configured for automatic retrieval. They are applied as soon as the group is switched to manual, which makes the command order independent (tools like tcpip.c send the addresses before setting the automatic/manual flag).
+- Changing the DNS servers does not alter the DHCP state of the IP address group.
+- Peer IP address (index 2) is not supported and returns error code 4 (invalid parameters).
+- The manually configured addresses persist across reboots.
 
 *Input Parameters:* 
 
@@ -2031,5 +2082,44 @@ This command returns information about the currently stored key pair, and option
 | 2 - 3    | Response Size | variable                                                                                                             |
 | 4        | B flags       | bit 0: 1 = key pair is currently stored                                                                              |
 | 5 - X    | Fingerprint   | Unpadded Base64 SHA-256 public key fingerprint, null-terminated string                                                |
+
+### <a name="uvendorcommands"></a> Vendor Commands
+
+#### <a name="cuudpstatex"></a> UDP_STATEX
+
+This is a vendor private command, not part of the TCP-IP UNAPI specification. It performs
+a non destructive peek of the oldest pending datagram of a UDP connection: no datagram is
+consumed, reordered or altered, and the next TCPIP_UDP_RCV will return exactly the datagram
+described here. It can be polled as often as desired.
+
+*Input Parameters:*
+
+| Position | Function          | Value        |
+|:--------:| ----------------- | ------------ |
+| 0        | Connection Number | 1 byte value |
+
+*Command Structure:*
+
+| Position | Function          | Value                                                               |
+|:--------:| ----------------- | ------------------------------------------------------------------- |
+| 0        | CMD_BYTE          | 210                                                                 |
+| 1 - 2    | INPUT_PARAMS_SIZE | 16 bits value (MSB LSB) indicating the size of the input parameters |
+| 3        | INPUT_PARAMS      | Connection Number                                                   |
+
+*Response Structure:*
+
+| Position | Function      | Value                                                                                                                                   |
+|:--------:| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| 0        | CMD_BYTE      | 210                                                                                                                                     |
+| 1        | Error Code    | 0 - Ok<br/>4 - Invalid parameters: not enough input data<br/>11 - Connection number is not open or is not a UDP connection               |
+| 2 - 3    | Response Size | 16 bits value (MSB LSB) indicating the size of the response: always 0x0009                                                               |
+|          |               | This part of response only exists if error code is 0                                                                                     |
+| 4        | Datagram Count| 0 - No datagram pending<br/>1 - At least one datagram pending. The exact number of queued datagrams is not exposed by the ESP32 network stack, so 1 means "data available" |
+| 5 - 6    | Oldest Datagram Size | 16 bits value (LSB MSB) indicating the size of the oldest pending datagram, data bytes only                          |
+| 7 - 10   | Sender IP Address | IP Address (same byte order as TCPIP_UDP_RCV)                                                                                        |
+| 11 - 12  | Sender Port   | 16 bits value (LSB MSB)                                                                                                                  |
+
+When the datagram count is 0, the size and sender are returned as zero.
+
 
 

@@ -1,7 +1,7 @@
 /*
 ESP32-UNAPI-Firmware.ino
     ESP32 UNAPI Implementation.
-    Revision 1.0
+    Revision 1.1
 
 Requires Arduino IDE and ESP32 libraries
 
@@ -68,6 +68,7 @@ v0.3
 #include <lwip/sockets.h>
 #include <lwip/tcp.h>
 #include <lwip/api.h>
+#include <new>
 // sockets_priv.h declares lwip_socket_dbg_get_socket() outside extern "C",
 // so we forward-declare it ourselves with correct C linkage.
 struct lwip_sock {
@@ -77,12 +78,17 @@ extern "C" struct lwip_sock *lwip_socket_dbg_get_socket(int fd);
 
 #define HTTP_PACKET_SIZE 2048
 SET_LOOP_TASK_STACK_SIZE(65536); // 64KB stack — best balance for DRAM vs headroom
-WiFiClientSecure *TClient1;
-unsigned char bTLSInUse = 0;
 unsigned char uchTLSHost[256];
 bool bHasHostName = false;
+// CA certificate/bundle kept resident in order to avoid large heap allocations
+// and fragmentation on every TLS connection. Invalidated on certificate update.
+static char *pCachedCACert = NULL;
+static size_t uiCachedCACertSize = 0;
+static bool bCachedCACertIsBundle = false;
+// Shared buffer used for non destructive UDP peeks (UDP_STATE/UDP_STATEX)
+static byte udpPeekBuf[1500];
 
-const char chVer[4] = "1.0";
+const char chVer[4] = "1.1";
 byte btConnections[4] = {CONN_CLOSED,CONN_CLOSED,CONN_CLOSED,CONN_CLOSED};
 bool btSSHFilter[4] = {false,false,false,false};
 //UDP Objects
@@ -103,6 +109,11 @@ static byte btIPConnection4[4] = {0,0,0,0};
 IPAddress externalIP,DNSQueryIP;
 bool bIPAutomatic = true;
 bool bDNSAutomatic = true;
+// Manual (static) configuration cache. Values are applied to the network
+// stack only when the corresponding group is in manual mode. Keeping them
+// here makes TCPIP_CONFIG_IP order independent (tools such as tcpip.c send
+// the addresses before setting the automatic/manual flags).
+static IPAddress manualLocalIP, manualGateway, manualMask, manualDNS1, manualDNS2;
 bool bSerialUpdateInProgress = false;
 // True when RS232 update is a CERT update (Y/z/E flow)
 // rather than a firmware update (Z/z/E flow). The cert path streams bytes
@@ -183,9 +194,13 @@ void DisableRadio();
 void RadioUpdateStatus();
 void ScheduleTimeoutCheck();
 void CertificatesHash(size_t certsSize, const unsigned char *certBuff, byte shaResult[32]);
+void filter_ssh_buffer_inplace(uint8_t conn_id, uint8_t *buffer, int *length, bool reset);
+
+bool bLedStatus = false;
 
 static inline void wifiLedSet(bool on) {
 #ifdef USE_WIFI_LED
+  bLedStatus = on;
   if (WIFI_LED_RGB)
     // blue at 50% = connected (R=0, G=0, B=128)
     rgbLedWrite(WIFI_LED_PIN, 0, 0, on ? 128 : 0);
@@ -376,7 +391,7 @@ bool validateConfigFile() {
   &&(stDeviceConfiguration.ucConfigFileName[6]=='P')&&(stDeviceConfiguration.ucConfigFileName[7]=='I'))
     bReturn = true;
 
-  if ((!bReturn)||(stDeviceConfiguration.ucStructVersion<3))
+  if ((!bReturn)||(stDeviceConfiguration.ucStructVersion<4))
   {
     if (!bReturn)
     {
@@ -388,7 +403,7 @@ bool validateConfigFile() {
       stDeviceConfiguration.ucConfigFileName[5]='A';
       stDeviceConfiguration.ucConfigFileName[6]='P';
       stDeviceConfiguration.ucConfigFileName[7]='I';
-      stDeviceConfiguration.ucStructVersion = 3;
+      stDeviceConfiguration.ucStructVersion = 4;
       stDeviceConfiguration.ucNagle = 0;
       stDeviceConfiguration.ucAlwaysOn = 0;
       stDeviceConfiguration.uiRadioOffTimer = 120;
@@ -396,23 +411,42 @@ bool validateConfigFile() {
       stDeviceConfiguration.iGMT = -3;
       stDeviceConfiguration.ucBaudRate = ESP32BAUDRATE;
       stDeviceConfiguration.ucAutoUpdateFH = 0;
+      stDeviceConfiguration.ucIPAutomatic = 1;
+      stDeviceConfiguration.ucDNSAutomatic = 1;
+      memset(stDeviceConfiguration.ucManualLocalIP,0,4);
+      memset(stDeviceConfiguration.ucManualGateway,0,4);
+      memset(stDeviceConfiguration.ucManualMask,0,4);
+      memset(stDeviceConfiguration.ucManualDNS1,0,4);
+      memset(stDeviceConfiguration.ucManualDNS2,0,4);
     }
     else
     {
       if (stDeviceConfiguration.ucStructVersion < 2)// just need to update structure
       {
-        stDeviceConfiguration.ucStructVersion = 3;
+        stDeviceConfiguration.ucStructVersion = 4;
         stDeviceConfiguration.ucAutoClock = 0;
         stDeviceConfiguration.iGMT = -3;
         stDeviceConfiguration.ucBaudRate = ESP32BAUDRATE;
         stDeviceConfiguration.ucAutoUpdateFH = 0;
       }
-      else // just need to update structure
+      else if (stDeviceConfiguration.ucStructVersion < 3)
       {
-        stDeviceConfiguration.ucStructVersion = 3;
+        stDeviceConfiguration.ucStructVersion = 4;
         stDeviceConfiguration.ucBaudRate = ESP32BAUDRATE;
         stDeviceConfiguration.ucAutoUpdateFH = 0;
       }
+      else
+      {
+        stDeviceConfiguration.ucStructVersion = 4;
+      }
+      // New in version 4: automatic/manual address configuration
+      stDeviceConfiguration.ucIPAutomatic = 1;
+      stDeviceConfiguration.ucDNSAutomatic = 1;
+      memset(stDeviceConfiguration.ucManualLocalIP,0,4);
+      memset(stDeviceConfiguration.ucManualGateway,0,4);
+      memset(stDeviceConfiguration.ucManualMask,0,4);
+      memset(stDeviceConfiguration.ucManualDNS1,0,4);
+      memset(stDeviceConfiguration.ucManualDNS2,0,4);
       saveFileConfig();
     }
   }
@@ -473,11 +507,13 @@ void setUartSpeed(){
       break;
     case BR859372:
       Serial.begin(859372);
+      //Serial.begin(9600);
       break;
   }
 }
 
 void deviceHealth() {
+  //wifiLedSet(!bLedStatus);
   Serial.printf("Free_Heap: %u | Max_Block: %u\n", heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
   Serial.printf("FFAT - Free space: %lu Total FFAspace:%lu\n", (unsigned long)FFat.freeBytes(), (unsigned long)FFat.totalBytes());
   File root = FFat.open("/");
@@ -493,10 +529,93 @@ void deviceHealth() {
   }
 }
 
+// ======================== Manual IP configuration ========================
+
+static inline bool isZeroIP(const IPAddress &ip) {
+  return (ip[0] | ip[1] | ip[2] | ip[3]) == 0;
+}
+
+static void ipToConfigBytes(unsigned char *dst, const IPAddress &ip) {
+  dst[0] = ip[0];
+  dst[1] = ip[1];
+  dst[2] = ip[2];
+  dst[3] = ip[3];
+}
+
+static IPAddress ipFromConfigBytes(const unsigned char *src) {
+  return IPAddress(src[0], src[1], src[2], src[3]);
+}
+
+static void loadManualFromConfig() {
+  manualLocalIP = ipFromConfigBytes(stDeviceConfiguration.ucManualLocalIP);
+  manualGateway = ipFromConfigBytes(stDeviceConfiguration.ucManualGateway);
+  manualMask    = ipFromConfigBytes(stDeviceConfiguration.ucManualMask);
+  manualDNS1    = ipFromConfigBytes(stDeviceConfiguration.ucManualDNS1);
+  manualDNS2    = ipFromConfigBytes(stDeviceConfiguration.ucManualDNS2);
+}
+
+static void syncManualToConfig() {
+  stDeviceConfiguration.ucIPAutomatic  = bIPAutomatic ? 1 : 0;
+  stDeviceConfiguration.ucDNSAutomatic = bDNSAutomatic ? 1 : 0;
+  ipToConfigBytes(stDeviceConfiguration.ucManualLocalIP, manualLocalIP);
+  ipToConfigBytes(stDeviceConfiguration.ucManualGateway, manualGateway);
+  ipToConfigBytes(stDeviceConfiguration.ucManualMask, manualMask);
+  ipToConfigBytes(stDeviceConfiguration.ucManualDNS1, manualDNS1);
+  ipToConfigBytes(stDeviceConfiguration.ucManualDNS2, manualDNS2);
+}
+
+// Apply the cached manual addresses to the network stack. Only called when
+// the IP address group is configured as manual.
+static void applyManualIPConfig() {
+  if (isZeroIP(manualLocalIP))
+    return; // local IP not known yet, nothing to apply
+
+  IPAddress gw = isZeroIP(manualGateway) ? WiFi.gatewayIP() : manualGateway;
+  IPAddress mask = isZeroIP(manualMask) ? WiFi.subnetMask() : manualMask;
+  if (isZeroIP(mask))
+    mask = IPAddress(255, 255, 255, 0);
+
+  IPAddress d1 = WiFi.dnsIP(0);
+  IPAddress d2 = WiFi.dnsIP(1);
+  if (!bDNSAutomatic) {
+    if (!isZeroIP(manualDNS1)) d1 = manualDNS1;
+    if (!isZeroIP(manualDNS2)) d2 = manualDNS2;
+  }
+  WiFi.config(manualLocalIP, gw, mask, d1, d2);
+}
+
+// Apply the cached manual DNS servers. Uses a DNS only API so the DHCP
+// client state of the IP address group is not altered.
+static void applyManualDNS() {
+  if (isZeroIP(manualDNS1) && isZeroIP(manualDNS2))
+    return;
+  IPAddress d1 = isZeroIP(manualDNS1) ? WiFi.dnsIP(0) : manualDNS1;
+  IPAddress d2 = isZeroIP(manualDNS2) ? WiFi.dnsIP(1) : manualDNS2;
+  WiFi.setDNS(d1, d2);
+}
+
+// Restart DHCP for the IP address group (manual -> automatic transition).
+static void restartDHCP() {
+  WiFi.config(IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0),
+              IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0));
+}
+
 void setup() {
   WiFi.persistent(true);
-  EEPROM.begin(32);
+  EEPROM.begin(64);
   validateConfigFile();
+  bIPAutomatic = (stDeviceConfiguration.ucIPAutomatic != 0);
+  bDNSAutomatic = (stDeviceConfiguration.ucDNSAutomatic != 0);
+  loadManualFromConfig();
+  // IP manual + DNS automatic is not a supported combination; normalize
+  // values that may have been stored by an intermediate build
+  if ((!bIPAutomatic) && (bDNSAutomatic))
+  {
+    bIPAutomatic = true;
+    bDNSAutomatic = true;
+    syncManualToConfig();
+    saveFileConfig();
+  }
   Serial.setRxBufferSize(2148);
   Serial.setTimeout(1);
   setUartSpeed();
@@ -559,6 +678,16 @@ void setup() {
     WiFi.mode(WIFI_OFF);
     bWiFiOn = false;
   }
+  if (bWiFiOn)
+  {
+    // Re-apply the persisted manual addresses, they are not persisted by
+    // the network stack itself
+    if (!bIPAutomatic)
+      applyManualIPConfig();
+    if (!bDNSAutomatic)
+      applyManualDNS();
+    WiFi.begin();
+  }
   configTime(0,0, "pool.ntp.org");
   libssh_begin();
   deviceHealth();
@@ -610,11 +739,24 @@ bool InitCertificates() {
   return true;
 }
 
-// Load CA certificates from FFat (FATFS) on demand.
+// Invalidate the resident CA certificate/bundle cache. Called after a
+// certificate update so the next TLS connection reloads it from FFat.
+static void invalidateCACertCache() {
+  if (pCachedCACert) {
+    free(pCachedCACert);
+    pCachedCACert = NULL;
+  }
+  uiCachedCACertSize = 0;
+  bCachedCACertIsBundle = false;
+}
+
+// Load CA certificates from FFat (FATFS) once, keeping them resident.
 // Both cacert.pem and legacy certs.bin will work.
-// Returns the allocated buffer set on the client (caller MUST free after connect()),
-// or NULL if no cert could be loaded.
-char *loadCACertForClient(WiFiClientSecure *client) {
+// Returns true if a certificate/bundle is available.
+static bool ensureCACertCacheLoaded() {
+  if (pCachedCACert)
+    return true;
+
   const char *pemPaths[] = {"/ca.pem", "/cacert.pem"};
   for (size_t i = 0; i < (sizeof(pemPaths) / sizeof(pemPaths[0])); i++) {
     File f = FFat.open(pemPaths[i], "r");
@@ -627,23 +769,97 @@ char *loadCACertForClient(WiFiClientSecure *client) {
     f.close();
     if (rd > 0) {
       buf[rd] = 0;
-      client->setCACert(buf);
-      return buf;
+      pCachedCACert = buf;
+      uiCachedCACertSize = rd;
+      bCachedCACertIsBundle = false;
+      return true;
     }
     free(buf);
   }
 
   File b = FFat.open("/certs.bin", "r");
-  if (!b) return NULL;
+  if (!b) return false;
   size_t size = b.size();
-  if (size == 0) { b.close(); return NULL; }
+  if (size == 0) { b.close(); return false; }
   uint8_t *buf = (uint8_t*)malloc(size);
-  if (!buf) { b.close(); return NULL; }
+  if (!buf) { b.close(); return false; }
   size_t rd = b.read(buf, size);
   b.close();
-  if (rd != size) { free(buf); return NULL; }
-  client->setCACertBundle(buf, size);
-  return (char*)buf;
+  if (rd != size) { free(buf); return false; }
+  pCachedCACert = (char*)buf;
+  uiCachedCACertSize = size;
+  bCachedCACertIsBundle = true;
+  return true;
+}
+
+// Apply the resident CA certificate/bundle to a client. The buffer stays
+// owned by this module (the client makes its own internal copy).
+static void applyCACertToClient(WiFiClientSecure *client) {
+  if (!pCachedCACert)
+    return;
+  if (bCachedCACertIsBundle)
+    client->setCACertBundle((const uint8_t*)pCachedCACert, uiCachedCACertSize);
+  else
+    client->setCACert(pCachedCACert);
+}
+
+// Non destructive peek of the oldest pending UDP datagram of a connection
+// number (1-4). Returns the datagram data size (0 = nothing pending) and
+// optionally the sender address. The datagram is NOT consumed: the next
+// udpReceiveDatagram returns exactly this datagram.
+static int udpPeekDatagram(byte btConnNumber, IPAddress *pSenderIP, uint16_t *puiSenderPort) {
+  int iFd = -1;
+  switch (btConnNumber) {
+    case 1: iFd = Udp1.fd(); break;
+    case 2: iFd = Udp2.fd(); break;
+    case 3: iFd = Udp3.fd(); break;
+    case 4: iFd = Udp4.fd(); break;
+    default: return 0;
+  }
+  if (iFd < 0)
+    return 0;
+
+  struct sockaddr_in stFrom;
+  socklen_t slFromLen = sizeof(stFrom);
+  memset(&stFrom, 0, sizeof(stFrom));
+  int iLen = recvfrom(iFd, udpPeekBuf, sizeof(udpPeekBuf), MSG_PEEK | MSG_DONTWAIT, (struct sockaddr *)&stFrom, &slFromLen);
+  if (iLen <= 0)
+    return 0;
+
+  if (pSenderIP)
+    *pSenderIP = IPAddress(stFrom.sin_addr.s_addr);
+  if (puiSenderPort)
+    *puiSenderPort = ntohs(stFrom.sin_port);
+  return iLen;
+}
+
+// Consume the oldest pending UDP datagram of a connection number (1-4).
+// Returns the number of data bytes read (0 = nothing pending) and optionally
+// the sender address.
+static int udpReceiveDatagram(byte btConnNumber, byte *pucData, size_t uiMaxLen, IPAddress *pSenderIP, uint16_t *puiSenderPort) {
+  int iFd = -1;
+  switch (btConnNumber) {
+    case 1: iFd = Udp1.fd(); break;
+    case 2: iFd = Udp2.fd(); break;
+    case 3: iFd = Udp3.fd(); break;
+    case 4: iFd = Udp4.fd(); break;
+    default: return 0;
+  }
+  if ((iFd < 0) || (uiMaxLen == 0))
+    return 0;
+
+  struct sockaddr_in stFrom;
+  socklen_t slFromLen = sizeof(stFrom);
+  memset(&stFrom, 0, sizeof(stFrom));
+  int iLen = recvfrom(iFd, pucData, uiMaxLen, MSG_DONTWAIT, (struct sockaddr *)&stFrom, &slFromLen);
+  if (iLen <= 0)
+    return 0;
+
+  if (pSenderIP)
+    *pSenderIP = IPAddress(stFrom.sin_addr.s_addr);
+  if (puiSenderPort)
+    *puiSenderPort = ntohs(stFrom.sin_port);
+  return iLen;
 }
 
 bool IsActivePortInUse (unsigned int uiPort) {
@@ -761,9 +977,6 @@ void CloseTcpConnection (byte btConnNumber) {
       break;
     }
     uiRemotePorts[0]=0;
-
-    if (btConnections[btConnNumber-1] == CONN_TCP_TLS_A)
-      bTLSInUse = 0;
 
   }
 
@@ -964,9 +1177,21 @@ void WarmBoot() {
         sshSessions[bti] = NULL;
       }
     }
-    CloseTcpConnection(bti);
-    CloseUdpConnection(bti);
+    // CloseTcpConnection and CloseUdpConnection expect 1 based connection numbers
+    CloseTcpConnection(bti+1);
+    CloseUdpConnection(bti+1);
+
+    // Reset all per connection SSH state, otherwise a pending host key
+    // approval would survive the warm boot and block new SSH_OPEN calls
+    sshPendingValid[bti] = false;
+    sshPendingHashValid[bti] = false;
+    sshKbdIntActive[bti] = false;
+    sshChallengeDataLen[bti] = 0;
+    sshSubsystems[bti] = 0;
+    btSSHFilter[bti] = false;
+    filter_ssh_buffer_inplace(bti+1, NULL, NULL, true);
   }
+  sshPendingSecretLen = 0;
   if ((!bWiFiOn)&&(stDeviceConfiguration.ucAutoClock!=3))
   {
     bWiFiOn = true;
@@ -2059,6 +2284,7 @@ void received_data_parser () {
               if (FFat.exists(targetPath)) FFat.remove(targetPath);
               if (FFat.rename("/cert_upload.tmp", targetPath))
               {
+                invalidateCACertCache();
                 SendQuickResponse(btCommand, UNAPI_ERR_OK);
                 // No ESP.restart() — cert update is hot-applied.
               }
@@ -2278,6 +2504,7 @@ void received_data_parser () {
           case TCPIP_UDP_STATE:
           case TCPIP_UDP_SEND:
           case TCPIP_UDP_RCV:
+          case CUSTOM_F_UDP_STATEX:
           case TCPIP_TCP_OPEN:
           case TCPIP_TCP_CLOSE:
           case TCPIP_TCP_ABORT:
@@ -2335,6 +2562,13 @@ void received_data_parser () {
           uiCmdDataLen += btTmp;
           uiCmdDataRemaining = uiCmdDataLen;
           btCmdInternalStep = 0;
+          if (uiCmdDataLen > (MAX_CMD_DATA_LEN - 1))
+          {
+            // Reject oversized commands to avoid corrupting the command buffer
+            SendResponse(btCommand,UNAPI_ERR_INV_PARAM,0,0);
+            btState = RX_PARSER_IDLE;
+            break;
+          }
           if (uiCmdDataLen)
             btState = RX_PARSER_GET_DATA;
           else
@@ -2491,14 +2725,76 @@ proccesscmd:
           }
         break;
         case TCPIP_CONFIG_AUTOIP:
-          if ((uiCmdDataLen != 2) || (btCommandData[0]>1) || (btCommandData[1]>3))
+          if ((uiCmdDataLen != 2) || (btCommandData[0]>1))
+            SendResponse(btCommand,UNAPI_ERR_INV_PARAM,0,0);
+          else if ((btCommandData[0]==1) && ((btCommandData[1]>3) || (btCommandData[1]==2)))
+            // Configuration 2 (IP manual + DNS automatic) is not supported:
+            // without a DHCP lease there is no way to obtain DNS servers
+            // automatically
             SendResponse(btCommand,UNAPI_ERR_INV_PARAM,0,0);
           else
           {
             if (btCommandData[0]) //set?
             {
-              bIPAutomatic = (btCommandData[1] & 1) != 0;
-              bDNSAutomatic = (btCommandData[1] & 2) != 0;
+              bool bNewIPAuto = (btCommandData[1] & 1) != 0;
+              bool bNewDNSAuto = (btCommandData[1] & 2) != 0;
+              bool bWasIPAuto = bIPAutomatic;
+              bool bWasDNSAuto = bDNSAutomatic;
+
+              if (bNewIPAuto != bIPAutomatic)
+              {
+                if (bNewIPAuto)
+                {
+                  // manual -> automatic: restart DHCP and forget stale manual IPs
+                  manualLocalIP = IPAddress(0,0,0,0);
+                  manualGateway = IPAddress(0,0,0,0);
+                  manualMask = IPAddress(0,0,0,0);
+                  restartDHCP();
+                }
+                else
+                {
+                  // automatic -> manual: current addresses become the manual ones
+                  if (isZeroIP(manualLocalIP)) manualLocalIP = WiFi.localIP();
+                  if (isZeroIP(manualGateway)) manualGateway = WiFi.gatewayIP();
+                  if (isZeroIP(manualMask)) manualMask = WiFi.subnetMask();
+                  applyManualIPConfig();
+                }
+              }
+
+              if (bNewDNSAuto != bDNSAutomatic)
+              {
+                if (!bNewDNSAuto)
+                {
+                  // automatic -> manual: adopt current DNS servers
+                  if (isZeroIP(manualDNS1)) manualDNS1 = WiFi.dnsIP(0);
+                  if (isZeroIP(manualDNS2)) manualDNS2 = WiFi.dnsIP(1);
+                }
+                else
+                {
+                  // manual -> automatic: a new DHCP lease will provide them
+                  manualDNS1 = IPAddress(0,0,0,0);
+                  manualDNS2 = IPAddress(0,0,0,0);
+                }
+              }
+
+              bIPAutomatic = bNewIPAuto;
+              bDNSAutomatic = bNewDNSAuto;
+
+              if (!bDNSAutomatic)
+                applyManualDNS(); // DHCP restart may have cleared DNS
+
+              syncManualToConfig();
+              saveFileConfig();
+
+              // DHCP is already running but DNS just became automatic: force a
+              // new lease so the automatic DNS servers take effect without a
+              // reboot (open connections are closed by the reconnection)
+              if (bNewDNSAuto && !bWasDNSAuto && bNewIPAuto && bWasIPAuto)
+              {
+                WiFi.disconnect();
+                yield();
+                WiFi.begin();
+              }
             }
             if (bIPAutomatic)
               bAutoIPConfig|=B00000001;
@@ -2513,47 +2809,35 @@ proccesscmd:
           }
         break;
         case TCPIP_CONFIG_IP:
-          externalIP[0] = btCommandData[1];
-          externalIP[1] = btCommandData[2];
-          externalIP[2] = btCommandData[3];
-          externalIP[3] = btCommandData[4];
           if ((uiCmdDataLen != 5) || (btCommandData[0]==0) || (btCommandData[0]==2)|| (btCommandData[0]>6))
             SendResponse(btCommand,UNAPI_ERR_INV_PARAM,0,0);
           else
           {
-            if ((!bIPAutomatic) && ( (btCommandData[0]==1)||(btCommandData[0]==3)||(btCommandData[0]==4) ))
+            externalIP[0] = btCommandData[1];
+            externalIP[1] = btCommandData[2];
+            externalIP[2] = btCommandData[3];
+            externalIP[3] = btCommandData[4];
+
+            switch (btCommandData[0])
             {
-              //Set IP/MASK/GATEWAY
-              switch (btCommandData[0])
-              {
-                case 1:
-                  WiFi.config(externalIP,WiFi.gatewayIP(),WiFi.subnetMask(),WiFi.dnsIP(0),WiFi.dnsIP(1));
-                break;
-                case 3:
-                  WiFi.config(WiFi.localIP(),WiFi.gatewayIP(),externalIP,WiFi.dnsIP(0),WiFi.dnsIP(1));
-                break;
-                case 4:
-                  WiFi.config(WiFi.localIP(),externalIP,WiFi.subnetMask(),WiFi.dnsIP(0),WiFi.dnsIP(1));
-                break;
-              }
-              SendResponse(btCommand,UNAPI_ERR_OK,0,0);
+              case 1: manualLocalIP = externalIP; break;
+              case 3: manualMask = externalIP; break;
+              case 4: manualGateway = externalIP; break;
+              case 5: manualDNS1 = externalIP; break;
+              case 6: manualDNS2 = externalIP; break;
             }
-            else if ((!bDNSAutomatic) && ( (btCommandData[0]==5)||(btCommandData[0]==6) ))
-            {
-              //Set Primary DNS or secondary DNS
-              switch (btCommandData[0])
-              {
-                case 5:
-                  WiFi.config(WiFi.localIP(),WiFi.gatewayIP(),WiFi.subnetMask(),externalIP,WiFi.dnsIP(1));
-                break;
-                case 6:
-                  WiFi.config(WiFi.localIP(),WiFi.gatewayIP(),WiFi.subnetMask(),WiFi.dnsIP(0),externalIP);
-                break;
-              }
-              SendResponse(btCommand,UNAPI_ERR_OK,0,0);
-            }
-            else //sorry
-              SendResponse(btCommand,UNAPI_ERR_INV_PARAM,0,0);
+
+            // While the group is automatic the value is stored and applied
+            // when the group is switched to manual (tools like tcpip.c send
+            // the addresses before setting the automatic/manual flag)
+            if ((btCommandData[0] <= 4) && !bIPAutomatic)
+              applyManualIPConfig();
+            else if ((btCommandData[0] >= 5) && !bDNSAutomatic)
+              applyManualDNS();
+
+            syncManualToConfig();
+            saveFileConfig();
+            SendResponse(btCommand,UNAPI_ERR_OK,0,0);
           }
         break;
         case CUSTOM_F_UPDATE_FW:
@@ -2654,6 +2938,7 @@ proccesscmd:
                         if (FFat.exists(ttargetPath)) FFat.remove(ttargetPath);
                         if (FFat.rename("/cert_upload.tmp", ttargetPath))
                         {
+                          invalidateCACertCache();
                           SendQuickResponse(btCommand, UNAPI_ERR_OK);
                           // No ESP.restart() — cert update is hot-applied.
                         }
@@ -3107,8 +3392,15 @@ proccesscmd:
               {
                 if (btCMDPassive&4) //TLS?
                 {
-                  if ((bTLSInUse)||(checkOpenConnections()>=4))
-                    //TODO: can we have more than 1 TLS connection on ESP32?
+                  // TLS can use any free pool slot on ESP32, but only when there
+                  // is enough free heap for the TLS context and buffers. The CA
+                  // certificate/bundle is referenced by pointer by the core
+                  // (esp_crt_bundle_set does not copy it), so it must not be
+                  // added to the requirement again.
+                  bool bValidateCert = (btCMDPassive&8) != 0;
+                  if (bValidateCert)
+                    ensureCACertCacheLoaded();
+                  if ((checkOpenConnections()>=4) || (heap_caps_get_free_size(MALLOC_CAP_8BIT) < TLS_MIN_FREE_HEAP))
                     SendResponse(btCommand,UNAPI_ERR_NO_FREE_CONN,0,0);
                   else
                   {
@@ -3116,10 +3408,10 @@ proccesscmd:
                     {
                       bHasHostName = true;
                       memset (uchTLSHost, 0, sizeof(uchTLSHost));
-                      if ((uiCmdDataLen-11)>256)
-                        memcpy (uchTLSHost,&btCommandData[11],(uiCmdDataLen-11));
-                      else
-                        memcpy (uchTLSHost,&btCommandData[11],255);
+                      unsigned int uiTLSHostLen = uiCmdDataLen - 11;
+                      if (uiTLSHostLen > (sizeof(uchTLSHost) - 1))
+                        uiTLSHostLen = sizeof(uchTLSHost) - 1;
+                      memcpy (uchTLSHost,&btCommandData[11],uiTLSHostLen);
                     }
                     else
                       bHasHostName = false;
@@ -3128,56 +3420,57 @@ proccesscmd:
                       if (btConnections[uiForHelper] == CONN_CLOSED)
                         break;
                     btCMDConnNumber = uiForHelper+1;
-                    bTLSInUse = btCMDConnNumber;
-                    ClientList[uiForHelper] = new WiFiClientSecure();
-                    TClient1 = (WiFiClientSecure*)ClientList[uiForHelper];
-                    ClientList[uiForHelper]->setNoDelay(!stDeviceConfiguration.ucNagle);
-
-                    char *certBuf = NULL;
-                    if (btCMDPassive&8) //validate certificates?
+                    ClientList[uiForHelper] = new (std::nothrow) WiFiClientSecure();
+                    if (ClientList[uiForHelper] == NULL)
                     {
-                      if (!bSNTPOK)
-                        setClock();
-                      certBuf = loadCACertForClient(TClient1);
-                    }
-                    else
-                      TClient1->setInsecure();
-
-                    if (bHasHostName)
-                      btCMDBeginRet = TClient1->connect((const char*)uchTLSHost, uiCMDRemotePort);
-                    else
-                      btCMDBeginRet = TClient1->connect(externalIP,uiCMDRemotePort);
-
-                    if (certBuf)
-                      free(certBuf);
-  
-                    if (btCMDBeginRet)
-                    {
-                      uiLocalPorts[uiForHelper] = TClient1->localPort();
-                      uiRemotePorts[uiForHelper] = TClient1->remotePort();
-                      switch (btCMDConnNumber) 
-                      {
-                        case 1: ipToBytes(externalIP, btIPConnection1); break;
-                        case 2: ipToBytes(externalIP, btIPConnection2); break;
-                        case 3: ipToBytes(externalIP, btIPConnection3); break;
-                        case 4: ipToBytes(externalIP, btIPConnection4); break;
-                      }
-                      {
-                        int rcvbuf = 4096;
-                        TClient1->setSocketOption(SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
-                      }
-                      btConnections[uiForHelper] = CONN_TCP_TLS_A;
-                      btIsTransient[uiForHelper] = btCMDTransient;
-                      SendResponse(btCommand,UNAPI_ERR_OK,1,&btCMDConnNumber);
+                      SendResponse(btCommand,UNAPI_ERR_NO_FREE_CONN,0,0);
                     }
                     else
                     {
-                      // TODO: instead of always returning ERR_TLS_OTHER, can we figure out error reason?
-                      btCommandData[0] = 19;
-                      delete ClientList[uiForHelper];
-                      ClientList[uiForHelper] = NULL;
-                      bTLSInUse = 0;
-                      SendResponse(btCommand, UNAPI_ERR_NO_CONN, 1, btCommandData);
+                      WiFiClientSecure *pTLSClient = (WiFiClientSecure*)ClientList[uiForHelper];
+                      ClientList[uiForHelper]->setNoDelay(!stDeviceConfiguration.ucNagle);
+
+                      if (bValidateCert)
+                      {
+                        if (!bSNTPOK)
+                          setClock();
+                        applyCACertToClient(pTLSClient);
+                      }
+                      else
+                        pTLSClient->setInsecure();
+
+                      if (bHasHostName)
+                        btCMDBeginRet = pTLSClient->connect((const char*)uchTLSHost, uiCMDRemotePort);
+                      else
+                        btCMDBeginRet = pTLSClient->connect(externalIP,uiCMDRemotePort);
+
+                      if (btCMDBeginRet)
+                      {
+                        uiLocalPorts[uiForHelper] = pTLSClient->localPort();
+                        uiRemotePorts[uiForHelper] = pTLSClient->remotePort();
+                        switch (btCMDConnNumber) 
+                        {
+                          case 1: ipToBytes(externalIP, btIPConnection1); break;
+                          case 2: ipToBytes(externalIP, btIPConnection2); break;
+                          case 3: ipToBytes(externalIP, btIPConnection3); break;
+                          case 4: ipToBytes(externalIP, btIPConnection4); break;
+                        }
+                        {
+                          int rcvbuf = 4096;
+                          pTLSClient->setSocketOption(SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+                        }
+                        btConnections[uiForHelper] = CONN_TCP_TLS_A;
+                        btIsTransient[uiForHelper] = btCMDTransient;
+                        SendResponse(btCommand,UNAPI_ERR_OK,1,&btCMDConnNumber);
+                      }
+                      else
+                      {
+                        // TODO: instead of always returning ERR_TLS_OTHER, can we figure out error reason?
+                        btCommandData[0] = 19;
+                        delete ClientList[uiForHelper];
+                        ClientList[uiForHelper] = NULL;
+                        SendResponse(btCommand, UNAPI_ERR_NO_CONN, 1, btCommandData);
+                      }
                     }
                   }
                 }
@@ -3374,21 +3667,9 @@ proccesscmd:
             {
               if (btConnections[btCMDConnNumber-1] == CONN_UDP)
               {
-                switch (btCMDConnNumber)
-                {
-                  case 1:
-                    iLenght = Udp1.parsePacket();
-                  break;
-                  case 2:
-                    iLenght = Udp2.parsePacket();
-                  break;
-                  case 3:
-                    iLenght = Udp3.parsePacket();
-                  break;
-                  case 4:
-                    iLenght = Udp4.parsePacket();
-                  break;
-                }
+                // Non destructive peek of the oldest datagram: parsePacket()
+                // would consume it into the library internal buffer and lose it
+                iLenght = udpPeekDatagram(btCMDConnNumber, NULL, NULL);
 
                 btCommandData[0] = (byte)(uiLocalPorts[btCMDConnNumber-1]&0xff);
                 btCommandData[1] = (byte)((uiLocalPorts[btCMDConnNumber-1]>>8)&0xff);
@@ -3441,31 +3722,40 @@ proccesscmd:
               {
                 if (WiFi.status() == WL_CONNECTED)
                 {
-                  switch (btCMDConnNumber)
+                  // Max outgoing datagram is 2048 bytes including IP and UDP
+                  // headers (28 bytes), so the data part cannot exceed 2020
+                  if ((uiCmdDataLen - 7) > 2020)
                   {
-                    case 1:
-                      Udp1.beginPacket(externalIP,ui16Port);
-                      Udp1.write(&btCommandData[7],uiCmdDataLen-7);
-                      Udp1.endPacket();
-                    break;
-                    case 2:
-                      Udp2.beginPacket(externalIP,ui16Port);
-                      Udp2.write(&btCommandData[7],uiCmdDataLen-7);
-                      Udp2.endPacket();
-                    break;
-                    case 3:
-                      Udp3.beginPacket(externalIP,ui16Port);
-                      Udp3.write(&btCommandData[7],uiCmdDataLen-7);
-                      Udp3.endPacket();
-                    break;
-                    case 4:
-                      Udp4.beginPacket(externalIP,ui16Port);
-                      Udp4.write(&btCommandData[7],uiCmdDataLen-7);
-                      Udp4.endPacket();
-                    break;
+                    SendResponse(btCommand,UNAPI_ERR_LARGE_DGRAM,0,0);
                   }
-                  yield();
-                  SendResponse(btCommand,UNAPI_ERR_OK,0,0);
+                  else
+                  {
+                    switch (btCMDConnNumber)
+                    {
+                      case 1:
+                        Udp1.beginPacket(externalIP,ui16Port);
+                        Udp1.write(&btCommandData[7],uiCmdDataLen-7);
+                        Udp1.endPacket();
+                      break;
+                      case 2:
+                        Udp2.beginPacket(externalIP,ui16Port);
+                        Udp2.write(&btCommandData[7],uiCmdDataLen-7);
+                        Udp2.endPacket();
+                      break;
+                      case 3:
+                        Udp3.beginPacket(externalIP,ui16Port);
+                        Udp3.write(&btCommandData[7],uiCmdDataLen-7);
+                        Udp3.endPacket();
+                      break;
+                      case 4:
+                        Udp4.beginPacket(externalIP,ui16Port);
+                        Udp4.write(&btCommandData[7],uiCmdDataLen-7);
+                        Udp4.endPacket();
+                      break;
+                    }
+                    yield();
+                    SendResponse(btCommand,UNAPI_ERR_OK,0,0);
+                  }
                 }
                 else
                   SendResponse(btCommand,UNAPI_ERR_NO_CONN,0,0);
@@ -3507,79 +3797,23 @@ proccesscmd:
             {
               if (btConnections[btCMDConnNumber-1] == CONN_UDP)
               {
-                switch (btCMDConnNumber)
+                IPAddress senderIP;
+                uint16_t uiSenderPort;
+                size_t uiMaxData = MAX_CMD_DATA_LEN - 7;
+                if (ui16RcvSize < uiMaxData)
+                  uiMaxData = ui16RcvSize;
+
+                iLenght = udpReceiveDatagram(btCMDConnNumber, &btCommandData[7], uiMaxData, &senderIP, &uiSenderPort);
+
+                if (iLenght)
                 {
-                  case 1:
-                    iLenght = Udp1.parsePacket();
-                    if (iLenght)
-                    {
-                      externalIP = Udp1.remoteIP();
-                      btCommandData[1] = externalIP[0];
-                      btCommandData[2] = externalIP[1];
-                      btCommandData[3] = externalIP[2];
-                      btCommandData[4] = externalIP[3];
-                      btCommandData[5] = (byte)(Udp1.remotePort()&0xff);
-                      btCommandData[6] = (byte)((Udp1.remotePort()>>8)&0xff);
-                      iLenght = Udp1.read(&btCommandData[7],iLenght);
-                      if (iLenght>ui16RcvSize)
-                        iLenght = ui16RcvSize;
-                    }
-                  break;
-                  case 2:
-                    iLenght = Udp2.parsePacket();
-                    if (iLenght)
-                    {
-                      externalIP = Udp2.remoteIP();
-                      btCommandData[1] = externalIP[0];
-                      btCommandData[2] = externalIP[1];
-                      btCommandData[3] = externalIP[2];
-                      btCommandData[4] = externalIP[3];
-                      btCommandData[5] = (byte)(Udp2.remotePort()&0xff);
-                      btCommandData[6] = (byte)((Udp2.remotePort()>>8)&0xff);
-                      iLenght = Udp2.read(&btCommandData[7],MAX_CMD_DATA_LEN);
-                      if (iLenght>ui16RcvSize)
-                        iLenght = ui16RcvSize;
-                    }
-                  break;
-                  case 3:
-                    iLenght = Udp3.parsePacket();
-                    if (iLenght)
-                    {
-                      externalIP = Udp3.remoteIP();
-                      btCommandData[1] = externalIP[0];
-                      btCommandData[2] = externalIP[1];
-                      btCommandData[3] = externalIP[2];
-                      btCommandData[4] = externalIP[3];
-                      btCommandData[5] = (byte)(Udp3.remotePort()&0xff);
-                      btCommandData[6] = (byte)((Udp3.remotePort()>>8)&0xff);
-                      iLenght = Udp3.read(&btCommandData[7],MAX_CMD_DATA_LEN);
-                      if (iLenght>ui16RcvSize)
-                        iLenght = ui16RcvSize;
-                    }
-                  break;
-                  case 4:
-                    iLenght = Udp4.parsePacket();
-                    if (iLenght)
-                    {
-                      externalIP = Udp4.remoteIP();
-                      btCommandData[1] = externalIP[0];
-                      btCommandData[2] = externalIP[1];
-                      btCommandData[3] = externalIP[2];
-                      btCommandData[4] = externalIP[3];
-                      btCommandData[5] = (byte)(Udp4.remotePort()&0xff);
-                      btCommandData[6] = (byte)((Udp4.remotePort()>>8)&0xff);
-                      iLenght = Udp4.read(&btCommandData[7],MAX_CMD_DATA_LEN);
-                      if (iLenght>ui16RcvSize)
-                        iLenght = ui16RcvSize;
-                    }
-                  break;
+                  ipToBytes(senderIP, &btCommandData[1]);
+                  btCommandData[5] = (byte)(uiSenderPort&0xff);
+                  btCommandData[6] = (byte)((uiSenderPort>>8)&0xff);
+                  SendResponse(btCommand,UNAPI_ERR_OK,iLenght+6,&btCommandData[1]);
                 }
-                if (iLenght)
-                  iLenght = iLenght + 6;
-                if (iLenght)
-                  SendResponse(btCommand,UNAPI_ERR_OK,iLenght,&btCommandData[1]);
                 else
-                  SendResponse(btCommand,UNAPI_ERR_NO_DATA,0,0);                
+                  SendResponse(btCommand,UNAPI_ERR_NO_DATA,0,0);
               }
               else
                 SendResponse(btCommand,UNAPI_ERR_NO_CONN,0,0);
@@ -3614,6 +3848,48 @@ proccesscmd:
             SendResponse(btCommand, UNAPI_ERR_INV_PARAM, 0, 0);
           }
           break;
+
+        // Vendor private command, not part of the TCP-IP UNAPI specification.
+        // Non destructive peek of the oldest pending datagram of a UDP
+        // connection, does not consume nor alter any datagram. The next
+        // UDP_RCV will return exactly the datagram described here.
+        //
+        // Request:  [210][0][1][conn]
+        // Response: [210][rc][0][9][payload]
+        // Payload: +0 pending datagram count (0 = none, 1 = at least one;
+        //             exact count is not available on this platform)
+        //          +1 size of the oldest datagram, low byte
+        //          +2 size of the oldest datagram, high byte
+        //          +3..+6 sender IP (same byte order as UDP_RCV)
+        //          +7 sender port, low byte
+        //          +8 sender port, high byte
+        case CUSTOM_F_UDP_STATEX:
+        {
+          btCMDConnNumber = btCommandData[0];
+          if (uiCmdDataLen != 1)
+            SendResponse(btCommand,UNAPI_ERR_INV_PARAM,0,0);
+          else if ((btCMDConnNumber>4)||(btCMDConnNumber==0)||(btConnections[btCMDConnNumber-1] != CONN_UDP))
+            SendResponse(btCommand,UNAPI_ERR_NO_CONN,0,0);
+          else
+          {
+            IPAddress senderIP;
+            uint16_t uiSenderPort;
+            iLenght = udpPeekDatagram(btCMDConnNumber, &senderIP, &uiSenderPort);
+            if (!iLenght)
+            {
+              senderIP = IPAddress(0,0,0,0);
+              uiSenderPort = 0;
+            }
+            btCommandData[0] = iLenght ? 1 : 0; //pending datagram count
+            btCommandData[1] = (byte)(iLenght&0xff); //oldest datagram size LSB
+            btCommandData[2] = (byte)((iLenght>>8)&0xff); //oldest datagram size MSB
+            ipToBytes(senderIP, &btCommandData[3]);
+            btCommandData[7] = (byte)(uiSenderPort&0xff); //sender port LSB
+            btCommandData[8] = (byte)((uiSenderPort>>8)&0xff); //sender port MSB
+            SendResponse(btCommand,UNAPI_ERR_OK,9,btCommandData);
+          }
+        }
+        break;
 
         case SSH_OPEN:
         {
@@ -3889,6 +4165,12 @@ proccesscmd:
 }
 void loop() {
   unsigned int uiI;
+  static wl_status_t lastWiFiStatus = WL_IDLE_STATUS;
+
+  wl_status_t stNow = WiFi.status();
+  if ((stNow == WL_CONNECTED) && (lastWiFiStatus != WL_CONNECTED) && !bDNSAutomatic)
+    applyManualDNS(); // DHCP may have overwritten the manual DNS servers
+  lastWiFiStatus = stNow;
 
   if (bDisableRadioPending) {
     bDisableRadioPending = false;
